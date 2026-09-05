@@ -74,7 +74,8 @@ class ReportGenerator:
             return float(score), str(sev), str(vec)
 
         flaw_type = record.flaw_type or record.rule_id or "UNKNOWN"
-        is_write = record.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+        method_str = (record.method or "GET").upper()
+        is_write = method_str in {"POST", "PUT", "PATCH", "DELETE"}
         calc_score, calc_sev, calc_vec = cls._calc.calculate_for_finding(
             flaw_type=flaw_type,
             requires_auth=True,
@@ -169,6 +170,8 @@ class ReportGenerator:
             start_line = max(1, r.line_start or r.line_number or 1)
             end_line = max(start_line, r.line_end or r.line_number or start_line)
             file_uri = r.file_path or "unknown"
+            if file_uri.startswith("/") and not file_uri.startswith("//"):
+                file_uri = file_uri.lstrip("/")
 
             description_text = r.description or r.details or f"{rule_id} vulnerability detected on {r.endpoint}"
 
@@ -321,7 +324,10 @@ class ReportGenerator:
             if r.reproduction_steps:
                 details_section.extend(["### Reproduction Steps", ""])
                 for i, step in enumerate(r.reproduction_steps, 1):
-                    step_desc = step.get("description") or step.get("action") or str(step)
+                    if isinstance(step, dict):
+                        step_desc = step.get("description") or step.get("action") or str(step)
+                    else:
+                        step_desc = str(step)
                     details_section.append(f"{i}. {step_desc}")
                 details_section.append("")
 
