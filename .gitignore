@@ -47,3 +47,9 @@ evidence/
 .idea/
 .vscode/
 *.swp
+
+# Superpowers scratch & worktrees
+.superpowers/
+.worktrees/
+worktrees/
+
