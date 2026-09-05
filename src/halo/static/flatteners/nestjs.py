@@ -154,11 +154,15 @@ class NestJSFlattener:
                 # Check for @Controller decorator
                 controller_prefix: str | None = None
                 controller_name: str = ""
-                class_node = (
-                    node
-                    if node.type == "class_declaration"
-                    else node.child_by_field_name("declaration")
-                )
+
+                class_node = None
+                if node.type == "class_declaration":
+                    class_node = node
+                else:
+                    for c in node.children:
+                        if c.type == "class_declaration":
+                            class_node = c
+                            break
 
                 # Look for decorators on node or class_node
                 decorators = [c for c in node.children if c.type == "decorator"]
@@ -187,16 +191,21 @@ class NestJSFlattener:
     def _extract_routes_regex(cls, code: str, file_path: str) -> list[dict[str, Any]]:
         routes: list[dict[str, Any]] = []
 
-        # Find controller classes: @Controller('prefix') class ControllerName { ... }
-        # Matches @Controller() or @Controller('...') with class body
+        # Find controller classes:
+        # Allows intervening decorators (e.g. @UseGuards(...), @ApiTags(...)) before and after @Controller(...)
+        # Supports `export default class`, `export class`, or plain `class`
         ctrl_pattern = re.compile(
-            r"@Controller\s*\(\s*(?:['\"`](.*?)['\"`])?\s*\)\s*(?:export\s+)?class\s+([A-Za-z0-9_]+)\s*\{",
+            r"@Controller\s*\(\s*(?:['\"`](.*?)['\"`])?\s*\)\s*"
+            r"(?:@[A-Za-z0-9_]+(?:\([^)]*\))?\s*)*"
+            r"(?:export\s+(?:default\s+)?)?class\s+([A-Za-z0-9_]+)\s*\{",
             re.MULTILINE,
         )
 
+        # Match method route decorators with possible intervening decorators before or after HTTP verb
         method_pattern = re.compile(
+            r"(?:@[A-Za-z0-9_]+(?:\([^)]*\))?\s*)*"
             r"@(Get|Post|Put|Delete|Patch|Options|Head|All)\s*\(\s*(?:['\"`](.*?)['\"`])?\s*\)\s*"
-            r"(?:@[A-Za-z0-9_]+\s*\([^)]*\)\s*)*"
+            r"(?:@[A-Za-z0-9_]+(?:\([^)]*\))?\s*)*"
             r"(?:(?:async\s+)?([A-Za-z0-9_]+)\s*\()",
             re.MULTILINE,
         )

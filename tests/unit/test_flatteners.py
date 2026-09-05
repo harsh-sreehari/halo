@@ -64,6 +64,7 @@ def test_laravel_all_seven_routes_and_paths():
     assert route_map["index"]["method"] == "GET"
     assert route_map["index"]["path"] == "/orders"
     assert route_map["index"]["handler"] == "OrderController@index"
+    assert route_map["index"]["methods"] == ["GET"]
 
     assert route_map["create"]["method"] == "GET"
     assert route_map["create"]["path"] == "/orders/create"
@@ -84,6 +85,7 @@ def test_laravel_all_seven_routes_and_paths():
     assert "PUT" in route_map["update"]["method"]
     assert route_map["update"]["path"] == "/orders/{id}"
     assert route_map["update"]["handler"] == "OrderController@update"
+    assert route_map["update"]["methods"] == ["PUT", "PATCH"]
 
     assert route_map["destroy"]["method"] == "DELETE"
     assert route_map["destroy"]["path"] == "/orders/{id}"
@@ -127,6 +129,37 @@ def test_laravel_api_resource_expansion():
     assert len(routes) == 5
     actions = {r["action"] for r in routes}
     assert actions == {"index", "store", "show", "update", "destroy"}
+
+
+def test_laravel_update_split_methods():
+    # Test split_methods=True on standard resource (7 actions -> 8 route entries)
+    routes = LaravelFlattener.expand_resource(
+        "orders", "OrderController", split_methods=True
+    )
+    assert len(routes) == 8
+    methods = {r["method"] for r in routes}
+    assert "PUT" in methods
+    assert "PATCH" in methods
+    assert "PUT/PATCH" not in methods
+
+    update_routes = [r for r in routes if r["action"] == "update"]
+    assert len(update_routes) == 2
+    update_methods = {r["method"] for r in update_routes}
+    assert update_methods == {"PUT", "PATCH"}
+    assert all(r["path"] == "/orders/{id}" for r in update_routes)
+
+    # Test convenience helper expand_resource_split
+    split_routes = LaravelFlattener.expand_resource_split("orders", "OrderController")
+    assert len(split_routes) == 8
+
+    # Test split_methods on apiResource (5 actions -> 6 route entries)
+    api_routes = LaravelFlattener.expand_api_resource(
+        "orders", "OrderController", split_methods=True
+    )
+    assert len(api_routes) == 6
+    api_methods = {r["method"] for r in api_routes}
+    assert "PUT" in api_methods
+    assert "PATCH" in api_methods
 
 
 def test_laravel_to_route_nodes():
@@ -217,6 +250,37 @@ def test_nestjs_extract_routes_from_typescript():
 
     assert route_by_handler["updateStatus"]["method"] == "PATCH"
     assert route_by_handler["updateStatus"]["path"] == "/api/v1/invoices/{id}/status"
+
+
+def test_nestjs_extract_routes_with_intervening_decorators_and_export_default():
+    ts_code = """
+    import { Controller, Get, UseGuards } from '@nestjs/common';
+    import { ApiTags } from '@nestjs/swagger';
+
+    @ApiTags('Invoices')
+    @Controller('api/v1/invoices')
+    @UseGuards(AuthGuard)
+    export default class InvoicesController {
+        @UseGuards(JwtGuard)
+        @Get(':id')
+        findOne() {
+            return {};
+        }
+    }
+    """
+    # 1. Test via default extraction (Tree-sitter)
+    routes_ts = NestJSFlattener.extract_routes(ts_code, file_path="src/invoices.controller.ts")
+    assert len(routes_ts) == 1
+    assert routes_ts[0]["method"] == "GET"
+    assert routes_ts[0]["path"] == "/api/v1/invoices/{id}"
+    assert routes_ts[0]["controller"] == "InvoicesController"
+
+    # 2. Test via explicit regex extraction fallback
+    routes_regex = NestJSFlattener._extract_routes_regex(ts_code, file_path="src/invoices.controller.ts")
+    assert len(routes_regex) == 1
+    assert routes_regex[0]["method"] == "GET"
+    assert routes_regex[0]["path"] == "/api/v1/invoices/{id}"
+    assert routes_regex[0]["controller"] == "InvoicesController"
 
 
 def test_nestjs_controller_default_prefix():

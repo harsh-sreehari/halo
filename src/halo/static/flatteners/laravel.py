@@ -31,16 +31,17 @@ class LaravelFlattener:
         only: Iterable[str] | None = None,
         except_actions: Iterable[str] | None = None,
         param_name: str = "id",
+        split_methods: bool = False,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """
-        Expand a Laravel Route::resource macro into its 7 standard REST endpoints:
+        Expand a Laravel Route::resource macro into its standard REST endpoints:
         - index: GET /resource
         - create: GET /resource/create
         - store: POST /resource
         - show: GET /resource/{id}
         - edit: GET /resource/{id}/edit
-        - update: PUT/PATCH /resource/{id}
+        - update: PUT/PATCH /resource/{id} (or distinct PUT and PATCH if split_methods=True)
         - destroy: DELETE /resource/{id}
 
         Args:
@@ -49,9 +50,12 @@ class LaravelFlattener:
             only: Whitelist of action names to generate
             except_actions: Blacklist of action names to omit
             param_name: Route parameter name, default 'id'
+            split_methods: If True, multi-verb actions like update (PUT/PATCH) are
+                           split into separate route entries for PUT and PATCH.
 
         Returns:
-            List of endpoint dictionaries containing action, method, path, handler, and controller.
+            List of endpoint dictionaries containing action, method, methods, path,
+            handler, and controller.
         """
         clean_resource = resource_name.strip("/")
         base_path = f"/{clean_resource}" if clean_resource else ""
@@ -78,18 +82,46 @@ class LaravelFlattener:
             if not path.startswith("/"):
                 path = f"/{path}"
 
-            route = {
-                "action": action,
-                "name": f"{clean_resource}.{action}" if clean_resource else action,
-                "method": item["method"],
-                "path": path,
-                "handler": f"{controller}@{action}",
-                "handler_name": f"{controller}@{action}",
-                "controller": controller,
-            }
-            routes.append(route)
+            action_name = f"{clean_resource}.{action}" if clean_resource else action
+            methods_list = [m.strip() for m in item["method"].split("/")]
+
+            if split_methods and len(methods_list) > 1:
+                for m in methods_list:
+                    route = {
+                        "action": action,
+                        "name": action_name,
+                        "method": m,
+                        "methods": [m],
+                        "path": path,
+                        "handler": f"{controller}@{action}",
+                        "handler_name": f"{controller}@{action}",
+                        "controller": controller,
+                    }
+                    routes.append(route)
+            else:
+                route = {
+                    "action": action,
+                    "name": action_name,
+                    "method": item["method"],
+                    "methods": methods_list,
+                    "path": path,
+                    "handler": f"{controller}@{action}",
+                    "handler_name": f"{controller}@{action}",
+                    "controller": controller,
+                }
+                routes.append(route)
 
         return routes
+
+    @classmethod
+    def expand_resource_split(
+        cls,
+        resource_name: str,
+        controller: str,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """Convenience method to expand resource with split_methods=True."""
+        return cls.expand_resource(resource_name, controller, split_methods=True, **kwargs)
 
     @classmethod
     def expand_api_resource(
@@ -99,11 +131,12 @@ class LaravelFlattener:
         only: Iterable[str] | None = None,
         except_actions: Iterable[str] | None = None,
         param_name: str = "id",
+        split_methods: bool = False,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """
         Expand a Laravel Route::apiResource macro, which excludes 'create' and 'edit'
-        HTML form actions and returns 5 REST endpoints (index, store, show, update, destroy).
+        HTML form actions and returns REST endpoints (index, store, show, update, destroy).
         """
         api_except = set(except_actions) if except_actions is not None else set()
         if kwargs.get("except"):
@@ -116,6 +149,7 @@ class LaravelFlattener:
             only=only,
             except_actions=api_except,
             param_name=param_name,
+            split_methods=split_methods,
             **kwargs,
         )
 
