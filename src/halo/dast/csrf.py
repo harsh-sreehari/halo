@@ -77,13 +77,17 @@ class CSRFHarvester:
             set_cookie_headers = headers.get_list("set-cookie")
         else:
             headers_dict = dict(headers)
+            set_cookie_headers = []
             for k, v in headers_dict.items():
-                if k.lower() in CSRF_HEADER_NAMES and v:
+                k_lower = k.lower()
+                if k_lower in CSRF_HEADER_NAMES and v:
                     self.last_token = v
                     return v
-
-            raw_cookie = headers_dict.get("set-cookie", "")
-            set_cookie_headers = [raw_cookie] if raw_cookie else []
+                if k_lower == "set-cookie" and v:
+                    if isinstance(v, list):
+                        set_cookie_headers.extend([str(item) for item in v])
+                    else:
+                        set_cookie_headers.append(str(v))
 
         # 2. Extract from Set-Cookie headers
         for cookie_str in set_cookie_headers:

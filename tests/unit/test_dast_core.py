@@ -340,3 +340,60 @@ def test_sandbox_manager_lifecycle_and_disabled_safe_mode():
     assert mgr.is_running is False
     assert mgr.stop() is True
 
+
+def test_session_vault_reauthentication_syncs_client_headers():
+    def handler(request: httpx.Request):
+        auth = request.headers.get("Authorization", "")
+        if request.url.path == "/api/me":
+            if auth == "Bearer expired_tok":
+                return httpx.Response(401)
+            return httpx.Response(200)
+        elif request.url.path == "/api/login":
+            return httpx.Response(200, json={"token": "fresh_tok_999"})
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://testapp")
+    vault = SessionVault()
+    vault.set_token(PersonaType.USER_A, "expired_tok")
+    cached_client = vault.get_session(PersonaType.USER_A)
+    assert cached_client.headers["Authorization"] == "Bearer expired_tok"
+
+    refreshed = vault.send_heartbeat(
+        persona=PersonaType.USER_A,
+        client=client,
+        ping_endpoint="/api/me",
+        login_endpoint="/api/login",
+    )
+    assert refreshed is True
+    assert client.headers["Authorization"] == "Bearer fresh_tok_999"
+    assert cached_client.headers["Authorization"] == "Bearer fresh_tok_999"
+
+
+def test_sandbox_readiness_probe_fallback_on_5xx(monkeypatch):
+    mgr = SandboxManager()
+
+    def mock_get(url: str, timeout: float = 2.0):
+        if url.endswith("/health"):
+            return httpx.Response(500)
+        return httpx.Response(200)
+
+    monkeypatch.setattr(httpx, "get", mock_get)
+    assert mgr._check_endpoint("http://localhost:8000", readiness_path="/health") is True
+
+
+def test_csrf_harvester_plain_dict_case_insensitivity():
+    harvester = CSRFHarvester()
+
+    # Title-case Set-Cookie
+    headers_title = {"Set-Cookie": "XSRF-TOKEN=title_csrf_val; Path=/"}
+    assert harvester.extract_from_headers(headers_title) == "title_csrf_val"
+
+    # Uppercase SET-COOKIE
+    headers_upper = {"SET-COOKIE": "csrf_token=upper_csrf_val; Path=/"}
+    assert harvester.extract_from_headers(headers_upper) == "upper_csrf_val"
+
+    # List of cookies in plain dict
+    headers_list = {"set-cookie": ["session=123", "XSRF-TOKEN=list_csrf_val; Path=/"]}
+    assert harvester.extract_from_headers(headers_list) == "list_csrf_val"
+
+

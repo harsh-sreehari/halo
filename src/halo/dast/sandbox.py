@@ -249,13 +249,16 @@ class SandboxManager:
             resp = httpx.get(probe_url, timeout=2.0)
             if resp.status_code < 500:
                 return True
-        except httpx.HTTPError:
-            try:
-                base_resp = httpx.get(url, timeout=2.0)
-                if base_resp.status_code < 500:
-                    return True
-            except httpx.HTTPError as err:
-                logger.debug("Readiness probe failed on base url %s: %s", url, err)
+            logger.debug("Readiness endpoint %s returned %d, testing base URL", probe_url, resp.status_code)
+        except httpx.HTTPError as err:
+            logger.debug("Readiness probe error on %s: %s, testing base URL", probe_url, err)
+
+        try:
+            base_resp = httpx.get(url, timeout=2.0)
+            if base_resp.status_code < 500:
+                return True
+        except httpx.HTTPError as err:
+            logger.debug("Readiness probe failed on base url %s: %s", url, err)
         return False
 
     def health_check(self, url: str | None = None) -> bool:

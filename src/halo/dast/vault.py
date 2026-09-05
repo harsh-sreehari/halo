@@ -369,6 +369,10 @@ class SessionVault:
                 token = self._extract_token_from_response(resp)
                 if token:
                     persona.set_token(token)
+                    if hasattr(client, "headers"):
+                        client.headers.update(persona.headers)
+                    if persona.persona_type in self._clients:
+                        self._clients[persona.persona_type].headers.update(persona.headers)
                     return True
         except httpx.HTTPError as err:
             logger.warning("Re-authentication failed for %s: %s", persona.persona_type, err)
