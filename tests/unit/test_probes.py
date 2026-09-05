@@ -567,3 +567,154 @@ def test_probe_result_serialization_and_fields():
     assert loaded.flaw_type == res.flaw_type
     assert loaded.confidence == res.confidence
     assert loaded.vulnerable == res.vulnerable
+
+
+# ---------------------------------------------------------------------------
+# 6. Review Round 1 Specific Regression & Edge-Case Tests
+# ---------------------------------------------------------------------------
+
+
+def test_race_condition_h2_transmitted_no_destructive_fallback(monkeypatch):
+    """Verify that if HTTP/2 burst streams were transmitted, H1.1 fallback is not triggered."""
+    probe = RaceConditionProbe()
+    h1_called = [False]
+
+    def mock_h2_burst(*args, **kwargs):
+        # Packets were transmitted to the server, but timeout occurred on receive
+        return True, False, [httpx.Response(504)]
+
+    def mock_h1_burst(*args, **kwargs):
+        h1_called[0] = True
+        return []
+
+    monkeypatch.setattr(probe, "_attempt_h2_burst", mock_h2_burst)
+    monkeypatch.setattr(probe, "_execute_h1_barrier_burst", mock_h1_burst)
+
+    result = probe.execute(
+        target_url="https://api.test",
+        endpoint="/api/redeem",
+        method="POST",
+        force_h2=True,
+    )
+    assert h1_called[0] is False, "H1.1 fallback should NOT be called if H2 packets were transmitted"
+    assert result.vulnerable is False
+
+
+def test_race_condition_vault_heartbeat_tracking():
+    """Verify request counts are recorded in SessionVault during concurrency race bursts."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
+    vault = SessionVault()
+    vault.set_token(PersonaType.USER_A, "token_a")
+    initial_count = vault.request_counts[PersonaType.USER_A]
+
+    probe = RaceConditionProbe()
+    probe.execute(
+        target_url="http://test",
+        endpoint="/api/vote",
+        method="POST",
+        vault=vault,
+        client=client,
+        burst_size=12,
+        force_h2=False,
+    )
+    assert vault.request_counts[PersonaType.USER_A] == initial_count + 12
+
+
+def test_workflow_probe_dynamic_n_step_skipping():
+    """Verify WorkflowProbe dynamically skips intermediate steps for N >= 3 workflows."""
+    called_endpoints = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called_endpoints.append(request.url.path)
+        # Vulnerable: accepts step 4 if step 0 occurred, regardless of intermediate steps
+        return httpx.Response(200, json={"status": "ok"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
+    vault = SessionVault()
+    vault.set_token(PersonaType.USER_A, "token_a")
+
+    steps = [
+        {"name": "step_0", "endpoint": "/api/step0", "method": "POST"},
+        {"name": "step_1", "endpoint": "/api/step1", "method": "POST"},
+        {"name": "step_2", "endpoint": "/api/step2", "method": "POST"},
+        {"name": "step_3", "endpoint": "/api/step3", "method": "POST"},
+        {"name": "step_4", "endpoint": "/api/step4", "method": "POST"},
+    ]
+
+    probe = WorkflowProbe()
+    result = probe.execute(
+        client=client,
+        target_url="http://test",
+        vault=vault,
+        workflow_steps=steps,
+    )
+    assert result.vulnerable is True
+    assert result.flaw_type == "WORKFLOW_BYPASS"
+    assert any("step_" in se for se in result.observed_side_effects)
+
+
+def test_workflow_probe_204_no_content_support():
+    """Verify that intermediate steps returning 204 No Content succeed without failing sequence."""
+    order_status = ["created"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/cart":
+            return httpx.Response(200, json={"cart_id": "c123"})
+        elif request.url.path == "/api/coupon":
+            # 204 No Content for coupon application
+            order_status[0] = "discounted"
+            return httpx.Response(204)
+        elif request.url.path == "/api/checkout":
+            return httpx.Response(200, json={"order_status": order_status[0]})
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
+    vault = SessionVault()
+    vault.set_token(PersonaType.USER_A, "token_a")
+
+    steps = [
+        {"name": "cart", "endpoint": "/api/cart", "method": "POST"},
+        {"name": "coupon", "endpoint": "/api/coupon", "method": "POST"},
+        {"name": "checkout", "endpoint": "/api/checkout", "method": "POST"},
+    ]
+
+    probe = WorkflowProbe()
+    # Execute a sequence that includes the 204 step
+    is_vuln, last_resp, _, _ = probe._run_step_sequence(
+        client,
+        [WorkflowStep(**s) for s in steps],
+        vault.get_headers(PersonaType.USER_A),
+        "USER_A",
+        "http://test",
+        vault,
+    )
+    assert is_vuln is True
+    assert last_resp is not None
+    assert last_resp.status_code == 200
+
+
+def test_bola_probe_multi_param_path_replacement():
+    """Verify _resolve_path replaces primary_param rather than parent route parameters."""
+    probe = BOLAProbe()
+
+    # Route with parent org_id and target invoice id
+    path_1 = probe._resolve_path(
+        template="/api/v1/organizations/{org_id}/invoices/{id}",
+        concrete=None,
+        resource_id="inv_999",
+        primary_param="id",
+    )
+    assert path_1 == "/api/v1/organizations/{org_id}/invoices/inv_999"
+
+    # Route with parent tenant_id and explicit invoice_id parameter
+    path_2 = probe._resolve_path(
+        template="/api/v1/tenants/{tenant_id}/orders/{order_id}",
+        concrete=None,
+        resource_id="ord_777",
+        primary_param="order_id",
+    )
+    assert path_2 == "/api/v1/tenants/{tenant_id}/orders/ord_777"
+

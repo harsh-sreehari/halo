@@ -100,6 +100,11 @@ class RaceConditionProbe(BaseProbe):
         if headers:
             req_headers.update(headers)
 
+        # Record request counts in vault to maintain session heartbeat telemetry
+        if vault:
+            for _ in range(burst_size):
+                vault.record_request(actor_type, client=client, target_url=target_url)
+
         # 1. Determine HTTP protocol (ALPN)
         use_h2: bool = False
         if force_h2 is True:
@@ -125,7 +130,7 @@ class RaceConditionProbe(BaseProbe):
 
         # 2. Execute Burst
         if use_h2:
-            h2_success, h2_resps = self._attempt_h2_burst(
+            transmitted, _h2_success, h2_resps = self._attempt_h2_burst(
                 target_url=target_url,
                 endpoint=endpoint,
                 method=method,
@@ -133,10 +138,12 @@ class RaceConditionProbe(BaseProbe):
                 headers=req_headers,
                 burst_size=burst_size,
             )
-            if h2_success:
+            if transmitted:
+                # Do NOT fall back to HTTP/1.1 if HTTP/2 streams were already transmitted to the server!
+                # Falling back after transmitting H2 packets fires a duplicate burst, consuming single-use resources.
                 responses = h2_resps
             else:
-                # Fallback to HTTP/1.1 barrier pool
+                # Safe fallback to HTTP/1.1 barrier pool only if H2 was NOT transmitted (e.g. library missing or connect failed)
                 responses = self._execute_h1_barrier_burst(
                     target_url=target_url,
                     endpoint=endpoint,
@@ -237,6 +244,13 @@ class RaceConditionProbe(BaseProbe):
             ),
         )
 
+    def _prewarm_connection(self, client: httpx.Client, target_url: str) -> None:
+        """Pre-warm keep-alive connection to eliminate TLS/TCP handshake jitter before barrier release."""
+        try:
+            client.request("HEAD", "/", timeout=1.0)
+        except Exception:  # noqa: BLE001, S110
+            pass
+
     def _execute_h1_barrier_burst(
         self,
         target_url: str,
@@ -255,6 +269,10 @@ class RaceConditionProbe(BaseProbe):
         def worker(index: int) -> None:
             # Each worker uses shared client (e.g. MockTransport in tests) or distinct client instance
             worker_client = client or httpx.Client(base_url=target_url, timeout=timeout)
+
+            # Pre-warm connection before barrier to eliminate handshake latency
+            self._prewarm_connection(worker_client, target_url)
+
             try:
                 # Synchronize threads at barrier
                 barrier.wait(timeout=10.0)
@@ -294,16 +312,25 @@ class RaceConditionProbe(BaseProbe):
         payload: dict[str, Any] | None,
         headers: dict[str, str],
         burst_size: int,
-    ) -> tuple[bool, list[httpx.Response]]:
-        """Attempt HTTP/2 single-packet multiplexed burst using h2 library if available."""
+    ) -> tuple[bool, bool, list[httpx.Response]]:
+        """Attempt HTTP/2 single-packet multiplexed burst using h2 library if available.
+
+        Returns:
+            tuple[transmitted, success, responses]
+            - transmitted: Whether the HTTP/2 burst streams were sent to the server.
+            - success: Whether responses were successfully captured.
+            - responses: List of HTTP responses collected.
+        """
         try:
             import h2.config
             import h2.connection
             import h2.events
         except ImportError:
             # h2 library not installed in runtime
-            return False, []
+            return False, False, []
 
+        transmitted = False
+        responses: list[httpx.Response] = []
         try:
             parsed = urllib.parse.urlparse(target_url)
             host = parsed.hostname or "localhost"
@@ -325,7 +352,7 @@ class RaceConditionProbe(BaseProbe):
 
                 # Prepare streams with partial frames
                 body_bytes = json.dumps(payload).encode() if payload else b""
-                streams = []
+                streams: list[int] = []
                 for _ in range(burst_size):
                     stream_id = conn.get_next_available_stream_id()
                     streams.append(stream_id)
@@ -345,31 +372,59 @@ class RaceConditionProbe(BaseProbe):
                 # Send all stream headers and partial data
                 sock.sendall(conn.data_to_send())
 
-                # Final burst release: send the final bytes simultaneously
+                # Final burst release: send the final bytes simultaneously in one TCP payload
                 for s_id in streams:
                     if body_bytes:
                         conn.send_data(s_id, body_bytes[-1:], end_stream=True)
 
                 sock.sendall(conn.data_to_send())
+                transmitted = True  # Packets are in flight to target server
 
-                # Read responses
-                responses: list[httpx.Response] = []
+                # Read responses while tracking active stream states
+                active_streams = set(streams)
                 sock.settimeout(5.0)
-                while len(responses) < burst_size:
-                    data = sock.recv(65535)
+                while active_streams:
+                    try:
+                        data = sock.recv(65535)
+                    except TimeoutError:
+                        logger.debug(
+                            "H2 socket timed out waiting for remaining stream responses; returning %d collected",
+                            len(responses),
+                        )
+                        break
+
                     if not data:
                         break
+
                     events = conn.receive_data(data)
+
+                    # Flush flow control and SETTINGS ACK frames immediately
+                    outbound = conn.data_to_send()
+                    if outbound:
+                        sock.sendall(outbound)
+
                     for ev in events:
                         if isinstance(ev, h2.events.ResponseReceived):
                             status = 200
+                            resp_hdrs: dict[str, str] = {}
                             for k, v in ev.headers:
-                                if k == b":status":
-                                    status = int(v)
+                                k_str = k.decode("utf-8", errors="ignore") if isinstance(k, bytes) else str(k)
+                                v_str = v.decode("utf-8", errors="ignore") if isinstance(v, bytes) else str(v)
+                                if k_str == ":status":
+                                    status = int(v_str)
+                                else:
+                                    resp_hdrs[k_str] = v_str
                             responses.append(
-                                httpx.Response(status, request=httpx.Request(method, endpoint))
+                                httpx.Response(
+                                    status,
+                                    headers=resp_hdrs,
+                                    request=httpx.Request(method, endpoint),
+                                )
                             )
-                return True, responses
+                        elif isinstance(ev, (h2.events.StreamEnded, h2.events.StreamReset)):
+                            active_streams.discard(ev.stream_id)
+
+                return True, len(responses) > 0, responses
         except Exception as exc:  # noqa: BLE001
-            logger.debug("H2 single packet burst failed: %s; falling back to H1.1", exc)
-            return False, []
+            logger.debug("H2 single packet burst error: %s", exc)
+            return transmitted, len(responses) > 0, responses

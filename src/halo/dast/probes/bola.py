@@ -392,23 +392,55 @@ class BOLAProbe(BaseProbe):
             return concrete
 
         path = template or concrete or f"/{resource_id}"
-        # Substitute placeholders: {id}, {param}, :id, :param, <param>, <type:param>
-        patterns = [
-            r"\{" + re.escape(primary_param) + r"(?::[^{}]+)?\}",
-            r"\{id(?::[^{}]+)?\}",
-            r"\{[^{}]+\}",
-            r":" + re.escape(primary_param) + r"\b",
-            r":id\b",
-            r"<(?:\w+:)?(?:id|" + re.escape(primary_param) + r")>",
-        ]
-        replaced = False
-        for pat in patterns:
-            if re.search(pat, path):
-                path = re.sub(pat, resource_id, path)
-                replaced = True
-                break
 
-        if not replaced and not path.endswith(f"/{resource_id}"):
+        # 1. High priority: exact match on primary_param (e.g. {invoice_id} or :invoice_id)
+        if primary_param:
+            exact_patterns = [
+                r"\{" + re.escape(primary_param) + r"(?::[^{}]+)?\}",
+                r":" + re.escape(primary_param) + r"\b",
+                r"<(?:\w+:)?" + re.escape(primary_param) + r">",
+            ]
+            for pat in exact_patterns:
+                if re.search(pat, path):
+                    return re.sub(pat, resource_id, path, count=1)
+
+        # 2. Standard ID patterns: {id}, :id, <id>
+        id_patterns = [
+            r"\{id(?::[^{}]+)?\}",
+            r":id\b",
+            r"<(?:\w+:)?id>",
+        ]
+        for pat in id_patterns:
+            if re.search(pat, path):
+                return re.sub(pat, resource_id, path, count=1)
+
+        # 3. Entity-specific ID patterns ending in _id or Id (e.g. {invoice_id}, :order_id)
+        entity_id_patterns = [
+            r"\{[a-zA-Z0-9_]*(?:_id|Id)(?::[^{}]+)?\}",
+            r":[a-zA-Z0-9_]*(?:_id|Id)\b",
+            r"<(?:\w+:)?[a-zA-Z0-9_]*(?:_id|Id)>",
+        ]
+        for pat in entity_id_patterns:
+            matches = list(re.finditer(pat, path))
+            if matches:
+                # Replace the innermost / last matching entity ID parameter
+                last_m = matches[-1]
+                return path[: last_m.start()] + resource_id + path[last_m.end() :]
+
+        # 4. Fallback: match the last generic path parameter {...}, :..., <...>
+        generic_patterns = [
+            r"\{[^{}]+\}",
+            r":[a-zA-Z0-9_]+",
+            r"<[^<>]+>",
+        ]
+        for pat in generic_patterns:
+            matches = list(re.finditer(pat, path))
+            if matches:
+                last_m = matches[-1]
+                return path[: last_m.start()] + resource_id + path[last_m.end() :]
+
+        # 5. Append if not already ending in resource_id
+        if not path.endswith(f"/{resource_id}"):
             if path.endswith("/"):
                 path = f"{path}{resource_id}"
             else:

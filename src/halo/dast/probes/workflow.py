@@ -96,23 +96,32 @@ class WorkflowProbe(BaseProbe):
         # -------------------------------------------------------------------
         # 1. Permutation Strategy: Step Skipping
         # -------------------------------------------------------------------
-        # For multi-step workflows (>= 3 steps), try skipping intermediate steps:
-        # e.g. Step 0 -> Step 2 (skipping Step 1)
+        # For multi-step workflows (>= 3 steps), dynamically generate permutations:
+        # 1. For each intermediate step k in [1, N-2], test sequence skipping k.
+        # 2. Also test skipping all intermediate steps directly from initial step[0] to terminal step[N-1].
         if len(steps) >= 3:
-            skip_sequences = []
-            # Skip step 1: [0, 2]
-            skip_sequences.append((
-                [steps[0], steps[2]],
-                [steps[1].name],
-                f"Skipping intermediate step '{steps[1].name}' (executed '{steps[0].name}' -> '{steps[2].name}')",
-            ))
-            # If 4 steps, also try skipping step 2: [0, 1, 3]
-            if len(steps) >= 4:
-                skip_sequences.append((
-                    [steps[0], steps[1], steps[3]],
-                    [steps[2].name],
-                    f"Skipping intermediate step '{steps[2].name}' (executed '{steps[0].name}' -> '{steps[1].name}' -> '{steps[3].name}')",
-                ))
+            n_steps = len(steps)
+            skip_sequences: list[tuple[list[WorkflowStep], list[str], str]] = []
+
+            # Permutation 1a: Skip each individual intermediate step k
+            for k in range(1, n_steps - 1):
+                seq = [steps[i] for i in range(n_steps) if i != k]
+                skipped_names = [steps[k].name]
+                desc = (
+                    f"Skipping intermediate step '{steps[k].name}' "
+                    f"(executed '{' -> '.join(s.name for s in seq)}')"
+                )
+                skip_sequences.append((seq, skipped_names, desc))
+
+            # Permutation 1b: Skip all intermediate steps directly from initial to terminal
+            if n_steps > 3:
+                seq = [steps[0], steps[-1]]
+                skipped_names = [s.name for s in steps[1:-1]]
+                desc = (
+                    f"Skipping all intermediate steps ({', '.join(skipped_names)}) "
+                    f"directly from '{steps[0].name}' to '{steps[-1].name}'"
+                )
+                skip_sequences.append((seq, skipped_names, desc))
 
             for seq, skipped_names, desc in skip_sequences:
                 is_vuln, last_resp, seq_req_ev, seq_resp_ev = self._run_step_sequence(
@@ -243,8 +252,8 @@ class WorkflowProbe(BaseProbe):
                 resp_evs.append(resp_ev)
                 last_resp = resp
 
-                # Extract variables for next steps
-                if resp.status_code in (200, 201, 202):
+                # Extract variables for next steps (supports 200, 201, 204 No Content, etc.)
+                if 200 <= resp.status_code < 300:
                     self._extract_step_variables(resp, step.extract, state_vars)
                 elif idx < len(sequence) - 1:
                     # An intermediate step in the sequence failed, sequence broken
