@@ -306,3 +306,91 @@ def test_class_method_interface():
 
         index = ManifestResolver.build_export_symbol_index(root)
         assert "add" in index
+
+
+def test_repo_boundary_containment():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        parent = Path(tmpdir)
+        root = parent / "repo"
+        root.mkdir(parents=True)
+        outside_file = parent / "secret.py"
+        outside_file.write_text("SECRET_KEY = 'secret'")
+
+        src_dir = root / "src"
+        src_dir.mkdir(parents=True)
+        routes_file = src_dir / "routes.py"
+        routes_file.write_text("pass")
+
+        resolver = ManifestResolver(root)
+
+        # Attempt to escape repo boundary via relative import
+        resolved_escape = resolver.resolve_import("../../secret.py", str(routes_file))
+        assert resolved_escape is None
+
+        # Attempt deep traversal escape
+        resolved_deep = resolver.resolve_import("../../../../../etc/passwd", str(routes_file))
+        assert resolved_deep is None
+
+
+def test_php_class_method_vs_standalone_function():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        app_dir = root / "app"
+        app_dir.mkdir(parents=True)
+        controller_file = app_dir / "OrderController.php"
+        controller_file.write_text(
+            """<?php
+namespace App\\Controllers;
+
+class OrderController {
+    public function store($req) {}
+    protected function validateData() {}
+    private function internalHelper() {}
+    function legacyMethod() {}
+}
+
+function process_standalone_order() {}
+"""
+        )
+
+        resolver = ManifestResolver(root)
+        index = resolver.build_export_symbol_index()
+
+        file_exports = index[str(controller_file.resolve())]
+
+        # Top-level class and standalone function should be indexed
+        assert "OrderController" in file_exports
+        assert "process_standalone_order" in file_exports
+
+        # Class methods should NOT be indexed as top-level exports
+        assert "store" not in file_exports
+        assert "validateData" not in file_exports
+        assert "internalHelper" not in file_exports
+        assert "legacyMethod" not in file_exports
+        assert "App\\Controllers\\store" not in file_exports
+
+
+def test_directory_pruning_in_export_index():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        src_dir = root / "src"
+        src_dir.mkdir(parents=True)
+        (src_dir / "main.py").write_text("def run(): pass\n")
+
+        # Create ignored directories with source files
+        node_modules = root / "node_modules" / "express"
+        node_modules.mkdir(parents=True)
+        (node_modules / "index.js").write_text("export function express() {}\n")
+
+        venv_dir = root / ".venv" / "lib"
+        venv_dir.mkdir(parents=True)
+        (venv_dir / "site.py").write_text("def site_func(): pass\n")
+
+        resolver = ManifestResolver(root)
+        index = resolver.build_export_symbol_index()
+
+        indexed_files = list(index.by_file.keys())
+        assert any(f.endswith("src/main.py") for f in indexed_files)
+        assert not any("node_modules" in f for f in indexed_files)
+        assert not any(".venv" in f for f in indexed_files)
+

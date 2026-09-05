@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import os
 import re
 import tomllib
 from pathlib import Path
@@ -26,6 +27,14 @@ def strip_json_comments(text: str) -> str:
     # Strip trailing commas before closing braces or brackets
     cleaned = re.sub(r",(?=\s*[\}\]])", "", cleaned)
     return cleaned
+
+
+def _is_contained_in_repo(path: Path, root: Path) -> bool:
+    """Verify that a path does not escape outside repository boundaries."""
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except (ValueError, TypeError):
+        return False
 
 
 class ExportSymbolIndex(dict[str, Any]):
@@ -326,6 +335,7 @@ class ManifestResolver:
         Resolve an import source to an absolute filesystem path.
         Handles relative imports, path aliases (tsconfig/composer/package.json/pyproject.toml),
         and baseUrl / pythonpath search roots with extension probing.
+        Ensures repository boundary containment.
         """
         if not isinstance(self_or_source, ManifestResolver):
             import_source = str(self_or_source)
@@ -355,7 +365,9 @@ class ManifestResolver:
                 target = (base / sub).resolve()
 
             found = self._probe_path(target)
-            return str(found) if found else None
+            if found and _is_contained_in_repo(found, root):
+                return str(found)
+            return None
 
         # 2. Alias resolution
         aliases = self.resolve_path_aliases(root)
@@ -376,7 +388,7 @@ class ManifestResolver:
                     remainder = normalized_import_bs[len(norm_alias_prefix) :].replace("\\", "/")
                     target = (root / target_dir / remainder).resolve()
                     found = self._probe_path(target)
-                    if found:
+                    if found and _is_contained_in_repo(found, root):
                         return str(found)
 
         # 2b. Wildcard aliases (e.g. @services/* -> src/services/*)
@@ -394,7 +406,7 @@ class ManifestResolver:
                     target_subpath = target_pattern.replace("*", wildcard_val)
                     target = (root / target_subpath).resolve()
                     found = self._probe_path(target)
-                    if found:
+                    if found and _is_contained_in_repo(found, root):
                         return str(found)
 
         # 2c. Exact alias match
@@ -402,7 +414,7 @@ class ManifestResolver:
             target_path = aliases[import_source]
             target = (root / target_path).resolve()
             found = self._probe_path(target)
-            if found:
+            if found and _is_contained_in_repo(found, root):
                 return str(found)
 
         # 2d. Subpath alias prefix match (e.g. @shared/config -> src/shared/config)
@@ -416,7 +428,7 @@ class ManifestResolver:
                     remainder = import_source[len(prefix) :]
                     target = (root / target_dir / remainder).resolve()
                     found = self._probe_path(target)
-                    if found:
+                    if found and _is_contained_in_repo(found, root):
                         return str(found)
 
         # 3. BaseUrl / Search Roots / Python Modules
@@ -432,7 +444,7 @@ class ManifestResolver:
         for search_root in candidate_roots:
             target = (search_root / import_source).resolve()
             found = self._probe_path(target)
-            if found:
+            if found and _is_contained_in_repo(found, root):
                 return str(found)
 
         # Python dot notation search (e.g. inventory.models -> inventory/models.py)
@@ -441,7 +453,7 @@ class ManifestResolver:
             for search_root in candidate_roots:
                 target = (search_root / python_subpath).resolve()
                 found = self._probe_path(target)
-                if found:
+                if found and _is_contained_in_repo(found, root):
                     return str(found)
 
         return None
@@ -453,6 +465,7 @@ class ManifestResolver:
         """
         Traverse ASTs and source files across the repository to catalog
         all exported classes, functions, and handler signatures (Pass 1 export table).
+        Uses os.walk and prunes ignored directories for fast traversal.
         """
         if not isinstance(self_or_repo, ManifestResolver):
             target_repo = self_or_repo if self_or_repo is not None else repo_path
@@ -477,34 +490,37 @@ class ManifestResolver:
             ".worktrees",
         }
 
-        for path in root.rglob("*"):
-            if not path.is_file():
-                continue
-            if any(part in ignored_dirs for part in path.parts):
-                continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            # Prune ignored and hidden directories in-place so os.walk does not descend
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in ignored_dirs and not d.startswith(".")
+            ]
 
-            ext = path.suffix.lower()
-            if ext not in self.EXTENSIONS:
-                continue
+            for filename in filenames:
+                path = Path(dirpath) / filename
+                ext = path.suffix.lower()
+                if ext not in self.EXTENSIONS:
+                    continue
 
-            try:
-                code = path.read_text(encoding="utf-8", errors="replace")
-            except OSError as exc:
-                logger.debug("Failed to read %s: %s", path, exc)
-                continue
+                try:
+                    code = path.read_text(encoding="utf-8", errors="replace")
+                except OSError as exc:
+                    logger.debug("Failed to read %s: %s", path, exc)
+                    continue
 
-            file_abs = str(path.resolve())
-            exports: dict[str, dict[str, Any]] = {}
+                file_abs = str(path.resolve())
+                exports: dict[str, dict[str, Any]] = {}
 
-            if ext == ".py":
-                exports = self._extract_python_exports(path, code)
-            elif ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
-                exports = self._extract_js_ts_exports(path, code)
-            elif ext == ".php":
-                exports = self._extract_php_exports(path, code)
+                if ext == ".py":
+                    exports = self._extract_python_exports(path, code)
+                elif ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+                    exports = self._extract_js_ts_exports(path, code)
+                elif ext == ".php":
+                    exports = self._extract_php_exports(path, code)
 
-            if exports:
-                index.register_file_exports(file_abs, exports)
+                if exports:
+                    index.register_file_exports(file_abs, exports)
 
         return index
 
@@ -663,14 +679,22 @@ class ManifestResolver:
     def _extract_php_exports(self, file_path: Path, code: str) -> dict[str, dict[str, Any]]:
         exports: dict[str, dict[str, Any]] = {}
         namespace = ""
+        brace_depth = 0
+        class_depth = -1
+        pending_class = False
+
         for line_no, line in enumerate(code.splitlines(), start=1):
             stripped = line.strip()
-            m_ns = re.search(r"namespace\s+([A-Za-z0-9_\\]+)\s*;", stripped)
+            # Strip inline comments to avoid false brace matches
+            stripped_clean = re.sub(r"//.*$", "", stripped)
+
+            m_ns = re.search(r"namespace\s+([A-Za-z0-9_\\]+)\s*;", stripped_clean)
             if m_ns:
                 namespace = m_ns.group(1).rstrip("\\")
 
             m_cls = re.search(
-                r"(?:final\s+|abstract\s+)?(class|interface|trait|enum)\s+([A-Za-z0-9_]+)", stripped
+                r"(?:final\s+|abstract\s+)?(class|interface|trait|enum)\s+([A-Za-z0-9_]+)",
+                stripped_clean,
             )
             if m_cls:
                 kind, name = m_cls.group(1), m_cls.group(2)
@@ -692,28 +716,44 @@ class ManifestResolver:
                         "signature": stripped,
                         "namespace": namespace,
                     }
-                continue
+                pending_class = True
 
-            m_fn = re.search(r"function\s+([A-Za-z0-9_]+)\s*\(", stripped)
-            if m_fn:
-                name = m_fn.group(1)
-                exports[name] = {
-                    "name": name,
-                    "kind": "function",
-                    "line": line_no,
-                    "file_path": str(file_path.resolve()),
-                    "signature": stripped,
-                    "namespace": namespace,
-                }
-                if namespace:
-                    fqn = f"{namespace}\\{name}"
-                    exports[fqn] = {
-                        "name": fqn,
+            # Match top-level standalone functions only (outside class/interface/trait scope)
+            is_method = bool(re.search(r"\b(public|protected|private)\s+", stripped_clean))
+            if not is_method and class_depth == -1 and not pending_class:
+                m_fn = re.search(r"(?:^|\s)function\s+([A-Za-z0-9_]+)\s*\(", stripped_clean)
+                if m_fn:
+                    name = m_fn.group(1)
+                    exports[name] = {
+                        "name": name,
                         "kind": "function",
                         "line": line_no,
                         "file_path": str(file_path.resolve()),
                         "signature": stripped,
                         "namespace": namespace,
                     }
+                    if namespace:
+                        fqn = f"{namespace}\\{name}"
+                        exports[fqn] = {
+                            "name": fqn,
+                            "kind": "function",
+                            "line": line_no,
+                            "file_path": str(file_path.resolve()),
+                            "signature": stripped,
+                            "namespace": namespace,
+                        }
+
+            # Track brace depth for class/interface/trait/enum scope containment
+            open_braces = stripped_clean.count("{")
+            close_braces = stripped_clean.count("}")
+            for _ in range(open_braces):
+                brace_depth += 1
+                if pending_class:
+                    class_depth = brace_depth
+                    pending_class = False
+            for _ in range(close_braces):
+                brace_depth -= 1
+                if class_depth != -1 and brace_depth < class_depth:
+                    class_depth = -1
 
         return exports
