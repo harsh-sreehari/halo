@@ -137,6 +137,7 @@ class OpenAIProvider(LLMProvider):
         governor: TokenGovernor | None = None,
         timeout: float = 30.0,
         fallback_response: str = '{"status": "ok", "mock": true, "provider": "openai"}',
+        fallback_on_error: bool = False,
     ) -> None:
         super().__init__(governor=governor, model=model)
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
@@ -144,6 +145,7 @@ class OpenAIProvider(LLMProvider):
         self.client = client
         self.timeout = timeout
         self.fallback_response = fallback_response
+        self.fallback_on_error = fallback_on_error
         self.offline_mode = not bool(self.api_key)
 
     def _call(self, prompt: str, system_prompt: str = "") -> tuple[str, int, int]:
@@ -193,6 +195,8 @@ class OpenAIProvider(LLMProvider):
             tokens_out = usage.get("completion_tokens", estimate_tokens(content))
             return content, tokens_in, tokens_out
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            if not self.fallback_on_error:
+                raise
             logger.warning("OpenAI API request failed: %s; falling back to offline mode", exc)
             return (
                 self.fallback_response,
@@ -213,6 +217,7 @@ class AnthropicProvider(LLMProvider):
         governor: TokenGovernor | None = None,
         timeout: float = 30.0,
         fallback_response: str = '{"status": "ok", "mock": true, "provider": "anthropic"}',
+        fallback_on_error: bool = False,
     ) -> None:
         super().__init__(governor=governor, model=model)
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
@@ -220,6 +225,7 @@ class AnthropicProvider(LLMProvider):
         self.client = client
         self.timeout = timeout
         self.fallback_response = fallback_response
+        self.fallback_on_error = fallback_on_error
         self.offline_mode = not bool(self.api_key)
 
     def _call(self, prompt: str, system_prompt: str = "") -> tuple[str, int, int]:
@@ -267,6 +273,8 @@ class AnthropicProvider(LLMProvider):
             tokens_out = usage.get("output_tokens", estimate_tokens(content))
             return content, tokens_in, tokens_out
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            if not self.fallback_on_error:
+                raise
             logger.warning("Anthropic API request failed: %s; falling back to offline mode", exc)
             return (
                 self.fallback_response,
@@ -287,6 +295,7 @@ class GeminiProvider(LLMProvider):
         governor: TokenGovernor | None = None,
         timeout: float = 30.0,
         fallback_response: str = '{"status": "ok", "mock": true, "provider": "gemini"}',
+        fallback_on_error: bool = False,
     ) -> None:
         super().__init__(governor=governor, model=model)
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
@@ -294,6 +303,7 @@ class GeminiProvider(LLMProvider):
         self.client = client
         self.timeout = timeout
         self.fallback_response = fallback_response
+        self.fallback_on_error = fallback_on_error
         self.offline_mode = not bool(self.api_key)
 
     def _call(self, prompt: str, system_prompt: str = "") -> tuple[str, int, int]:
@@ -341,6 +351,8 @@ class GeminiProvider(LLMProvider):
             tokens_out = usage.get("candidatesTokenCount", estimate_tokens(content))
             return content, tokens_in, tokens_out
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            if not self.fallback_on_error:
+                raise
             logger.warning("Gemini API request failed: %s; falling back to offline mode", exc)
             return (
                 self.fallback_response,
@@ -360,12 +372,14 @@ class OllamaProvider(LLMProvider):
         governor: TokenGovernor | None = None,
         timeout: float = 30.0,
         fallback_response: str = '{"status": "ok", "mock": true, "provider": "ollama"}',
+        fallback_on_error: bool = False,
     ) -> None:
         super().__init__(governor=governor, model=model)
         self.host = (host or os.getenv("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
         self.client = client
         self.timeout = timeout
         self.fallback_response = fallback_response
+        self.fallback_on_error = fallback_on_error
 
     def _call(self, prompt: str, system_prompt: str = "") -> tuple[str, int, int]:
         messages = []
@@ -401,6 +415,8 @@ class OllamaProvider(LLMProvider):
             tokens_out = data.get("eval_count", estimate_tokens(content))
             return content, tokens_in, tokens_out
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            if not self.fallback_on_error:
+                raise
             logger.warning("Ollama connection failed: %s; falling back to offline mode", exc)
             return (
                 self.fallback_response,
@@ -412,6 +428,7 @@ class OllamaProvider(LLMProvider):
 def get_llm_provider(
     provider_type: str = "mock",
     governor: TokenGovernor | None = None,
+    fallback_on_error: bool = False,
     **kwargs: Any,
 ) -> LLMProvider:
     """Factory creating an LLMProvider instance with transparent offline/mock fallbacks."""
@@ -428,7 +445,9 @@ def get_llm_provider(
                 "default_response", '{"mock": true, "provider": "openai"}'
             )
             return MockLLMProvider(governor=governor, default_response=default_resp, **kwargs)
-        return OpenAIProvider(governor=governor, **kwargs)
+        return OpenAIProvider(
+            governor=governor, fallback_on_error=fallback_on_error, **kwargs
+        )
 
     if p_type == "anthropic":
         api_key = kwargs.get("api_key") or os.getenv("ANTHROPIC_API_KEY")
@@ -438,7 +457,9 @@ def get_llm_provider(
                 "default_response", '{"mock": true, "provider": "anthropic"}'
             )
             return MockLLMProvider(governor=governor, default_response=default_resp, **kwargs)
-        return AnthropicProvider(governor=governor, **kwargs)
+        return AnthropicProvider(
+            governor=governor, fallback_on_error=fallback_on_error, **kwargs
+        )
 
     if p_type == "gemini":
         api_key = kwargs.get("api_key") or os.getenv("GEMINI_API_KEY")
@@ -448,20 +469,32 @@ def get_llm_provider(
                 "default_response", '{"mock": true, "provider": "gemini"}'
             )
             return MockLLMProvider(governor=governor, default_response=default_resp, **kwargs)
-        return GeminiProvider(governor=governor, **kwargs)
+        return GeminiProvider(
+            governor=governor, fallback_on_error=fallback_on_error, **kwargs
+        )
 
     if p_type == "ollama":
-        return OllamaProvider(governor=governor, **kwargs)
+        return OllamaProvider(
+            governor=governor, fallback_on_error=fallback_on_error, **kwargs
+        )
 
     if p_type == "auto":
         if os.getenv("OPENAI_API_KEY"):
-            return OpenAIProvider(governor=governor, **kwargs)
+            return OpenAIProvider(
+                governor=governor, fallback_on_error=fallback_on_error, **kwargs
+            )
         if os.getenv("ANTHROPIC_API_KEY"):
-            return AnthropicProvider(governor=governor, **kwargs)
+            return AnthropicProvider(
+                governor=governor, fallback_on_error=fallback_on_error, **kwargs
+            )
         if os.getenv("GEMINI_API_KEY"):
-            return GeminiProvider(governor=governor, **kwargs)
+            return GeminiProvider(
+                governor=governor, fallback_on_error=fallback_on_error, **kwargs
+            )
         if os.getenv("OLLAMA_HOST"):
-            return OllamaProvider(governor=governor, **kwargs)
+            return OllamaProvider(
+                governor=governor, fallback_on_error=fallback_on_error, **kwargs
+            )
         logger.info("No LLM credentials found in environment; auto-selecting MockLLMProvider")
         return MockLLMProvider(governor=governor, **kwargs)
 

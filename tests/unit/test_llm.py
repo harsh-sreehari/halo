@@ -58,6 +58,18 @@ def test_token_governor_cache():
     assert stats.cache_hits == 1
 
 
+def test_token_governor_prompt_hash_delimiter_collision_prevention():
+    # Null byte delimiter ensures different prompt/system_prompt boundaries produce different hashes
+    hash1 = TokenGovernor.hash_prompt(prompt="bc", system_prompt="a")
+    hash2 = TokenGovernor.hash_prompt(prompt="c", system_prompt="ab")
+    assert hash1 != hash2
+
+    # Empty system prompt handled cleanly
+    hash3 = TokenGovernor.hash_prompt(prompt="abc", system_prompt="")
+    assert hash3 != hash1
+    assert hash3 != hash2
+
+
 def test_token_governor_pydantic_stats():
     gov = TokenGovernor(max_budget=5000)
     gov.track_usage(100, 50)
@@ -349,15 +361,69 @@ def test_provider_adapters_fallback_when_keys_absent():
         assert "mock" in res_gemini or "offline" in res_gemini.lower() or "status" in res_gemini
 
 
-def test_ollama_unreachable_fallback():
-    # If Ollama server is unreachable, it should fall back to offline mode
-    def error_handler(request: httpx.Request):
+def test_live_adapters_raise_http_errors_by_default():
+    # When keys are provided and fallback_on_error is False (default), HTTP errors must re-raise
+
+    # 1. OpenAI 401 Unauthorized
+    def openai_err(req: httpx.Request):
+        return httpx.Response(status_code=401, text="Unauthorized: Invalid API Key")
+
+    client_openai = httpx.Client(transport=httpx.MockTransport(openai_err))
+    p_openai = OpenAIProvider(api_key="sk-invalid", client=client_openai, fallback_on_error=False)
+    with pytest.raises(httpx.HTTPStatusError):
+        p_openai.generate("test prompt")
+
+    # 2. Anthropic 500 Internal Server Error
+    def anthropic_err(req: httpx.Request):
+        return httpx.Response(status_code=500, text="Internal Server Error")
+
+    client_ant = httpx.Client(transport=httpx.MockTransport(anthropic_err))
+    p_ant = AnthropicProvider(api_key="sk-ant-test", client=client_ant, fallback_on_error=False)
+    with pytest.raises(httpx.HTTPStatusError):
+        p_ant.generate("test prompt")
+
+    # 3. Gemini 429 Rate Limited
+    def gemini_err(req: httpx.Request):
+        return httpx.Response(status_code=429, text="Resource Exhausted")
+
+    client_gem = httpx.Client(transport=httpx.MockTransport(gemini_err))
+    p_gem = GeminiProvider(api_key="gem-test", client=client_gem, fallback_on_error=False)
+    with pytest.raises(httpx.HTTPStatusError):
+        p_gem.generate("test prompt")
+
+    # 4. Ollama ConnectError
+    def ollama_err(req: httpx.Request):
         raise httpx.ConnectError("Connection refused")
 
-    client = httpx.Client(transport=httpx.MockTransport(error_handler))
-    provider = OllamaProvider(host="http://localhost:9999", client=client)
-    res = provider.generate("test")
-    assert "mock" in res or "offline" in res.lower() or "status" in res
+    client_ollama = httpx.Client(transport=httpx.MockTransport(ollama_err))
+    p_ollama = OllamaProvider(host="http://localhost:9999", client=client_ollama, fallback_on_error=False)
+    with pytest.raises(httpx.ConnectError):
+        p_ollama.generate("test prompt")
+
+
+def test_live_adapters_fallback_when_fallback_on_error_true():
+    # When fallback_on_error is explicitly True, errors return fallback responses without raising
+
+    def err_handler(req: httpx.Request):
+        return httpx.Response(status_code=500, text="Server Error")
+
+    client = httpx.Client(transport=httpx.MockTransport(err_handler))
+
+    p_openai = OpenAIProvider(api_key="sk-test", client=client, fallback_on_error=True)
+    assert "mock" in p_openai.generate("test")
+
+    p_ant = AnthropicProvider(api_key="sk-ant-test", client=client, fallback_on_error=True)
+    assert "mock" in p_ant.generate("test")
+
+    p_gem = GeminiProvider(api_key="gem-test", client=client, fallback_on_error=True)
+    assert "mock" in p_gem.generate("test")
+
+    def conn_err(req: httpx.Request):
+        raise httpx.ConnectError("Connection failed")
+
+    client_conn = httpx.Client(transport=httpx.MockTransport(conn_err))
+    p_ollama = OllamaProvider(host="http://localhost:9999", client=client_conn, fallback_on_error=True)
+    assert "mock" in p_ollama.generate("test")
 
 
 # ---------------------------------------------------------------------------
@@ -379,8 +445,9 @@ def test_get_llm_provider_factory():
         # Falls back to MockLLMProvider when key is absent
         assert isinstance(p_openai_absent, MockLLMProvider)
 
-        p_openai_with_key = get_llm_provider("openai", api_key="sk-explicit")
+        p_openai_with_key = get_llm_provider("openai", api_key="sk-explicit", fallback_on_error=True)
         assert isinstance(p_openai_with_key, OpenAIProvider)
+        assert p_openai_with_key.fallback_on_error is True
 
     # 3. Anthropic with key vs absent
     with patch.dict(os.environ, {}, clear=True):
@@ -389,6 +456,7 @@ def test_get_llm_provider_factory():
 
         p_anthropic_with_key = get_llm_provider("anthropic", api_key="sk-ant-explicit")
         assert isinstance(p_anthropic_with_key, AnthropicProvider)
+        assert p_anthropic_with_key.fallback_on_error is False
 
     # 4. Gemini with key vs absent
     with patch.dict(os.environ, {}, clear=True):

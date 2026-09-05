@@ -68,8 +68,8 @@ class TokenGovernor:
 
     @staticmethod
     def hash_prompt(prompt: str, system_prompt: str = "") -> str:
-        """Compute deterministic SHA-256 hex digest for (system_prompt + prompt)."""
-        content = f"{system_prompt}{prompt}"
+        """Compute deterministic SHA-256 hex digest for system_prompt and prompt with null byte delimiter."""
+        content = f"{system_prompt}\x00{prompt}"
         return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     def remaining_budget(self) -> int:
