@@ -22,7 +22,8 @@ dependencies = [
     "tree-sitter>=0.21.0,<0.22.0",
     "tree-sitter-languages>=1.10.2",
     "networkx>=3.3",
-    "aiosqlite>=0.20.0"
+    "aiosqlite>=0.20.0",
+    "pyyaml>=6.0.0"
 ]
 
 [project.optional-dependencies]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, ClassVar
@@ -11,6 +12,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, ConfigDict, Field
 
 from halo.llm.provider import LLMProvider
+from halo.static.graph import CodeKnowledgeGraph, NodeType
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,109 @@ class IntentExtractor:
     def __init__(self, llm_provider: LLMProvider | None = None) -> None:
         self.llm_provider = llm_provider
 
+    def parse_openapi_content(self, content: str) -> dict[str, Any]:
+        """Parse OpenAPI specification from raw content (JSON or YAML) with safe fallback."""
+        if not content or not content.strip():
+            return {}
+
+        # 1. Try JSON parsing
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # 2. Try PyYAML
+        try:
+            import yaml
+
+            data = yaml.safe_load(content)
+            if isinstance(data, dict):
+                return data
+        except ImportError:
+            logger.debug("PyYAML not installed, falling back to lightweight parser")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("PyYAML safe_load failed: %s", e)
+
+        # 3. Deterministic line-based regex fallback for OpenAPI YAML
+        return self._parse_fallback_yaml(content)
+
+    def _parse_fallback_yaml(self, content: str) -> dict[str, Any]:
+        """Lightweight fallback parser for OpenAPI YAML when PyYAML is unavailable."""
+        paths: dict[str, Any] = {}
+        curr_path: str | None = None
+        curr_method: str | None = None
+        curr_section: str | None = None
+
+        for raw_line in content.splitlines():
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+
+            # Match path header, e.g. "  /api/v1/invoices/{id}:"
+            path_match = re.match(r"^\s{2,4}(/[a-zA-Z0-9_\-/{}:]+):\s*$", line)
+            if path_match:
+                curr_path = path_match.group(1)
+                paths[curr_path] = {}
+                curr_method = None
+                curr_section = None
+                continue
+
+            # Match method header, e.g. "    get:"
+            method_match = re.match(
+                r"^\s{4,8}(get|post|put|delete|patch|options|head):\s*$",
+                line,
+                re.IGNORECASE,
+            )
+            if method_match and curr_path is not None:
+                curr_method = method_match.group(1).lower()
+                paths[curr_path][curr_method] = {
+                    "responses": {},
+                    "parameters": [],
+                    "security": [],
+                }
+                curr_section = None
+                continue
+
+            if curr_path and curr_method:
+                op = paths[curr_path][curr_method]
+                if re.match(r"^\s{6,10}responses:\s*$", line):
+                    curr_section = "responses"
+                    continue
+                if re.match(r"^\s{6,10}parameters:\s*$", line):
+                    curr_section = "parameters"
+                    continue
+                if re.match(r"^\s{6,10}security:\s*$", line):
+                    curr_section = "security"
+                    continue
+
+                if curr_section == "responses":
+                    resp_match = re.match(r"^\s{8,12}['\"]?(\d{3}|default)['\"]?:\s*", line)
+                    if resp_match:
+                        code = resp_match.group(1)
+                        op["responses"][code] = {}
+                elif curr_section == "parameters":
+                    name_match = re.match(r"^\s*-\s+name:\s*['\"]?([a-zA-Z0-9_\-]+)['\"]?", line)
+                    if name_match:
+                        op["parameters"].append({"name": name_match.group(1), "in": "query"})
+                    elif op["parameters"]:
+                        in_match = re.match(r"^\s+in:\s*['\"]?([a-zA-Z0-9_\-]+)['\"]?", line)
+                        if in_match:
+                            op["parameters"][-1]["in"] = in_match.group(1)
+                        type_match = re.match(r"^\s+type:\s*['\"]?([a-zA-Z0-9_\-]+)['\"]?", line)
+                        if type_match:
+                            op["parameters"][-1]["type"] = type_match.group(1)
+                elif curr_section == "security":
+                    sec_match = re.match(r"^\s*-\s+([a-zA-Z0-9_\-]+):\s*", line)
+                    if sec_match:
+                        op["security"].append({sec_match.group(1): []})
+
+        if paths:
+            return {"openapi": "3.0.0", "paths": paths}
+        return {}
+
     def distill_openapi(self, spec: dict[str, Any] | str) -> dict[str, Any]:
         """Deterministically distill an OpenAPI/Swagger specification.
 
@@ -69,10 +174,7 @@ class IntentExtractor:
         HTTP methods, security requirements, response status codes, and schema summaries.
         """
         if isinstance(spec, str):
-            try:
-                raw_dict: dict[str, Any] = json.loads(spec)
-            except json.JSONDecodeError:
-                raw_dict = {}
+            raw_dict = self.parse_openapi_content(spec)
         elif isinstance(spec, dict):
             raw_dict = spec
         else:
@@ -244,8 +346,49 @@ class IntentExtractor:
             result = result[:max_chars] + "\n...[truncated]"
         return result
 
-    def ingest_documentation(self, repo_path: str) -> dict[str, Any]:
-        """Collect README, OpenAPI specifications, and relevant inline docstrings from repo."""
+    def _extract_file_docstrings(self, content: str, ext: str) -> list[str]:
+        """Harvest docstrings or JSDoc comments containing security/business intent keywords."""
+        keywords = {
+            "role",
+            "roles",
+            "permission",
+            "permissions",
+            "auth",
+            "tenant",
+            "owner",
+            "invariant",
+            "state",
+            "transition",
+            "must",
+            "status",
+            "rule",
+            "security",
+            "belong",
+            "admin",
+            "forbidden",
+            "allow",
+        }
+        extracted: list[str] = []
+        if ext == ".py":
+            matches = re.findall(r'"""(.*?)"""|\'\'\'(.*?)\'\'\'', content, re.DOTALL)
+            for m in matches:
+                text = (m[0] or m[1]).strip()
+                if any(k in text.lower() for k in keywords) and len(text) > 15:
+                    extracted.append(text)
+        elif ext in (".js", ".ts", ".php"):
+            matches = re.findall(r"/\*\*(.*?)\*/", content, re.DOTALL)
+            for text in matches:
+                clean_text = "\n".join(line.strip().lstrip("* ") for line in text.splitlines()).strip()
+                if any(k in clean_text.lower() for k in keywords) and len(clean_text) > 15:
+                    extracted.append(clean_text)
+        return extracted
+
+    def ingest_documentation(
+        self,
+        repo_path: str,
+        ckg: CodeKnowledgeGraph | None = None,
+    ) -> dict[str, Any]:
+        """Collect README, OpenAPI specifications (JSON/YAML), and relevant inline docstrings."""
         repo = Path(repo_path)
         docs: dict[str, Any] = {
             "readme": "",
@@ -267,37 +410,100 @@ class IntentExtractor:
                 except (OSError, UnicodeDecodeError) as e:
                     logger.debug("Could not read %s: %s", readme_path, e)
 
-        # 2. Look for OpenAPI/Swagger files
-        openapi_candidates = [
+        # 2. Look for OpenAPI/Swagger files (JSON & YAML)
+        openapi_candidates: list[Path] = [
             repo / "openapi.json",
+            repo / "openapi.yaml",
+            repo / "openapi.yml",
             repo / "swagger.json",
+            repo / "swagger.yaml",
+            repo / "swagger.yml",
             repo / "api.json",
+            repo / "api.yaml",
+            repo / "api.yml",
             repo / "docs" / "openapi.json",
+            repo / "docs" / "openapi.yaml",
+            repo / "docs" / "openapi.yml",
             repo / "docs" / "swagger.json",
+            repo / "docs" / "swagger.yaml",
+            repo / "docs" / "swagger.yml",
             repo / "api" / "openapi.json",
+            repo / "api" / "openapi.yaml",
+            repo / "api" / "openapi.yml",
             repo / "specs" / "openapi.json",
+            repo / "specs" / "openapi.yaml",
+            repo / "specs" / "openapi.yml",
         ]
         try:
-            for p in repo.glob("*.json"):
-                if p not in openapi_candidates:
-                    openapi_candidates.append(p)
-            for p in repo.glob("*/*.json"):
-                if p not in openapi_candidates:
-                    openapi_candidates.append(p)
+            for ext_pattern in ("*.json", "*.yaml", "*.yml"):
+                for p in repo.glob(ext_pattern):
+                    if p not in openapi_candidates:
+                        openapi_candidates.append(p)
+                for p in repo.glob(f"*/*/{ext_pattern}"):
+                    if p not in openapi_candidates:
+                        openapi_candidates.append(p)
         except OSError as e:
-            logger.debug("Error globbing openapi json candidates: %s", e)
+            logger.debug("Error globbing openapi candidate specs: %s", e)
 
         for candidate in openapi_candidates:
             if candidate.is_file():
                 try:
                     content = candidate.read_text(encoding="utf-8", errors="ignore")
-                    data = json.loads(content)
-                    if isinstance(data, dict) and ("openapi" in data or "swagger" in data or "paths" in data):
-                        distilled = self.distill_openapi(data)
+                    parsed_spec = self.parse_openapi_content(content)
+                    if isinstance(parsed_spec, dict) and (
+                        "openapi" in parsed_spec or "swagger" in parsed_spec or "paths" in parsed_spec
+                    ):
+                        distilled = self.distill_openapi(parsed_spec)
                         docs["openapi"].append({"file": candidate.name, "spec": distilled})
-                except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
-                    logger.debug("Failed parsing openapi candidate %s: %s", candidate, e)
+                except (OSError, UnicodeDecodeError) as e:
+                    logger.debug("Failed reading openapi candidate %s: %s", candidate, e)
                     continue
+
+        # 3. Harvest inline docstrings from source files
+        source_exts = {".py", ".ts", ".js", ".php"}
+        ignored_dirs = {
+            ".git",
+            ".venv",
+            "venv",
+            "node_modules",
+            "vendor",
+            "__pycache__",
+            "tests",
+            "test",
+            "docs",
+            "dist",
+            "build",
+            ".pytest_cache",
+        }
+        file_count = 0
+        for root, dirs, files in os.walk(repo):
+            dirs[:] = [d for d in dirs if d not in ignored_dirs and not d.startswith(".")]
+            for f in files:
+                if file_count >= 200:
+                    break
+                suffix = Path(f).suffix.lower()
+                if suffix in source_exts:
+                    file_count += 1
+                    fpath = Path(root) / f
+                    try:
+                        content = fpath.read_text(encoding="utf-8", errors="ignore")
+                        extracted = self._extract_file_docstrings(content, suffix)
+                        for ds in extracted:
+                            rel_path = str(fpath.relative_to(repo))
+                            docs["docstrings"].append({"file": rel_path, "docstring": ds})
+                    except (OSError, UnicodeDecodeError) as e:
+                        logger.debug("Failed reading file %s for docstrings: %s", fpath, e)
+
+        # 4. Harvest handler docstrings from CKG if available
+        if ckg is not None:
+            for node in ckg.get_nodes_by_type(NodeType.HANDLER):
+                doc = getattr(node, "docstring", "")
+                if doc:
+                    docs["docstrings"].append({
+                        "file": getattr(node, "file_path", ""),
+                        "name": getattr(node, "name", ""),
+                        "docstring": str(doc).strip(),
+                    })
 
         return docs
 
@@ -305,10 +511,11 @@ class IntentExtractor:
         self,
         repo_path: str,
         llm_provider: LLMProvider | None = None,
+        ckg: CodeKnowledgeGraph | None = None,
     ) -> BusinessPolicyMatrix:
         """Synthesize BusinessPolicyMatrix using LLM or deterministic fallback."""
         provider = llm_provider if llm_provider is not None else self.llm_provider
-        docs = self.ingest_documentation(repo_path)
+        docs = self.ingest_documentation(repo_path, ckg=ckg)
 
         if provider is not None:
             try:
@@ -323,9 +530,15 @@ class IntentExtractor:
                     "}"
                 )
 
+                docstrings_summary = "\n---\n".join(
+                    f"[{d.get('file', '')}] {d.get('docstring', '')}"
+                    for d in docs.get("docstrings", [])[:15]
+                )
+
                 prompt = (
                     "Synthesize the Business Policy Matrix from the following project documentation.\n\n"
                     f"### README Context:\n{docs.get('readme', 'None')}\n\n"
+                    f"### Inline Docstrings:\n{docstrings_summary or 'None'}\n\n"
                     f"### OpenAPI Distillation:\n{json.dumps(docs.get('openapi', []), indent=2)}\n\n"
                     "Respond with strict JSON adhering to the specified schema."
                 )
@@ -375,25 +588,61 @@ class IntentExtractor:
         """Deterministic rule-based policy extraction from docs and OpenAPI paths when offline."""
         readme = docs.get("readme", "")
         openapi_specs = docs.get("openapi", [])
+        docstrings = docs.get("docstrings", [])
+
+        all_text_sources = [readme] + [d.get("docstring", "") for d in docstrings]
+        combined_text = "\n".join(all_text_sources)
 
         # 1. Extract Role Hierarchy
         discovered_roles: list[str] = []
 
         # Check for explicit hierarchy: e.g. "admin > merchant > customer"
-        hierarchy_match = re.search(
-            r"([a-zA-Z0-9_\-]+(?:\s*>\s*[a-zA-Z0-9_\-]+)+)",
-            readme,
-            re.IGNORECASE,
-        )
-        if hierarchy_match:
-            parts = [p.strip().lower() for p in hierarchy_match.group(1).split(">")]
-            for part in parts:
-                if part and part not in discovered_roles:
-                    discovered_roles.append(part)
-        else:
-            readme_lower = readme.lower()
+        for line in readme.splitlines():
+            if ">" not in line:
+                continue
+            line_lower = line.lower()
+            # Avoid shell redirections (e.g. python main.py > out.txt, npm run > log)
+            if line.strip().startswith(("$", "python", "python3", "node", "npm", "uv", "pip", "cat", "echo", "bash")):
+                continue
+
+            has_context_kw = any(
+                kw in line_lower
+                for kw in (
+                    "role",
+                    "roles",
+                    "hierarchy",
+                    "permission",
+                    "permissions",
+                    "access",
+                    "level",
+                    "tier",
+                    "privilege",
+                    "priority",
+                )
+            )
+            has_role_kw = any(r in line_lower for r in self.KNOWN_ROLES_PRIORITY)
+            if not (has_context_kw or has_role_kw):
+                continue
+
+            hierarchy_match = re.search(
+                r"([a-zA-Z0-9_\-]+(?:\s*>\s*[a-zA-Z0-9_\-]+)+)",
+                line,
+                re.IGNORECASE,
+            )
+            if hierarchy_match:
+                parts = [p.strip().lower() for p in hierarchy_match.group(1).split(">")]
+                # Ensure at least one part is a recognized role keyword
+                if any(p in self.KNOWN_ROLES_PRIORITY for p in parts):
+                    for part in parts:
+                        if part and part not in discovered_roles:
+                            discovered_roles.append(part)
+                    if discovered_roles:
+                        break
+
+        if not discovered_roles:
+            combined_lower = combined_text.lower()
             for role in self.KNOWN_ROLES_PRIORITY:
-                if re.search(r"\b" + re.escape(role) + r"\b", readme_lower) and role not in discovered_roles:
+                if re.search(r"\b" + re.escape(role) + r"\b", combined_lower) and role not in discovered_roles:
                     discovered_roles.append(role)
 
         if not discovered_roles:
@@ -401,7 +650,7 @@ class IntentExtractor:
 
         # 2. Extract Ownership Rules
         ownership_rules: list[str] = []
-        for sentence in re.split(r"[.\n]+", readme):
+        for sentence in re.split(r"[.\n]+", combined_text):
             s_clean = sentence.strip()
             s_lower = s_clean.lower()
             if (
@@ -433,7 +682,7 @@ class IntentExtractor:
 
         # 3. Extract State Invariants
         state_invariants: list[str] = []
-        for sentence in re.split(r"[.\n]+", readme):
+        for sentence in re.split(r"[.\n]+", combined_text):
             s_clean = sentence.strip()
             s_lower = s_clean.lower()
             if (

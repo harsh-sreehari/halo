@@ -85,6 +85,34 @@ ADMIN_PATH_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^/sys(?:/|$)", re.IGNORECASE),
 ]
 
+PRIVILEGED_ROLES: set[str] = {
+    "superadmin",
+    "root",
+    "owner",
+    "admin",
+    "administrator",
+    "manager",
+    "staff",
+    "moderator",
+    "ops",
+    "internal",
+}
+
+UNPRIVILEGED_ROLES: set[str] = {
+    "user",
+    "users",
+    "customer",
+    "customers",
+    "member",
+    "members",
+    "guest",
+    "guests",
+    "anonymous",
+    "public",
+    "client",
+    "clients",
+}
+
 WORKFLOW_ACTIONS: set[str] = {
     "ship",
     "fulfill",
@@ -389,12 +417,21 @@ class CandidatePruner:
                 f"Privileged route '{route.path}' lacks verified role-based authorization guard",
             )
 
-        # Check role hierarchy from policies
+        # Check role hierarchy from policies (strictly targeting privileged roles)
         if policies and policies.role_hierarchy:
-            top_roles = set(policies.role_hierarchy[:2])
+            top_roles = [
+                r
+                for r in policies.role_hierarchy
+                if r.lower() in PRIVILEGED_ROLES and r.lower() not in UNPRIVILEGED_ROLES
+            ]
             for role in top_roles:
                 role_clean = role.lower()
-                if f"/{role_clean}/" in path.lower() or path.lower().startswith(f"/{role_clean}"):
+                # Strict path boundary match (e.g. /admin/..., /api/v1/superadmin/..., not /users or /user/profile)
+                role_pattern = re.compile(
+                    rf"(?:^|/)(?:api/(?:v\d+/)?)?{re.escape(role_clean)}(?:/|$)",
+                    re.IGNORECASE,
+                )
+                if role_pattern.search(path):
                     return (
                         True,
                         f"Privileged route '{route.path}' for role '{role}' lacks explicit auth guard",
@@ -409,9 +446,16 @@ class CandidatePruner:
         policies: BusinessPolicyMatrix | None,
     ) -> tuple[bool, str]:
         """Evaluate route for Broken Workflow / State Invariant Bypass."""
+        method = route.method.upper()
+        # 1. State machine workflow transitions are strictly mutations (POST, PUT, PATCH, DELETE)
+        # Static read-only routes (GET, HEAD, OPTIONS) cannot trigger state transitions
+        if method not in ("POST", "PUT", "PATCH", "DELETE"):
+            return False, ""
+
         path_lower = route.path.lower()
         path_segments = set(re.findall(r"[a-zA-Z0-9_]+", path_lower))
 
+        # Match against predefined transition actions
         matched_actions = path_segments.intersection(WORKFLOW_ACTIONS)
         if matched_actions:
             action_str = ", ".join(sorted(matched_actions))
@@ -420,14 +464,33 @@ class CandidatePruner:
                 f"State transition endpoint '{route.path}' ({action_str}) requires state invariant verification",
             )
 
+        # 2. Match transition verbs from policy state invariants
         if policies and policies.state_invariants:
             for inv in policies.state_invariants:
                 inv_lower = inv.lower()
-                for segment in path_segments:
-                    if len(segment) > 3 and segment in inv_lower:
-                        return (
-                            True,
-                            f"Route '{route.path}' touches workflow state invariant: '{inv}'",
-                        )
+                inv_tokens = set(re.findall(r"[a-zA-Z0-9_]+", inv_lower))
+                # Only match transition action verbs, never generic entity nouns (like 'order', 'user')
+                relevant_actions = inv_tokens.intersection(WORKFLOW_ACTIONS).union({
+                    "pay",
+                    "paid",
+                    "capture",
+                    "authorize",
+                    "reject",
+                    "close",
+                    "reopen",
+                    "transfer",
+                    "activate",
+                    "deactivate",
+                    "promote",
+                    "demote",
+                    "release",
+                })
+                matched_inv_actions = path_segments.intersection(relevant_actions)
+                if matched_inv_actions:
+                    act_str = ", ".join(sorted(matched_inv_actions))
+                    return (
+                        True,
+                        f"Route '{route.path}' triggers state transition '{act_str}' tied to invariant: '{inv}'",
+                    )
 
         return False, ""

@@ -329,6 +329,89 @@ def test_candidate_pruner_bfla_and_workflow_detection():
     assert "WORKFLOW" in suspect_map["r_ship"].candidate_flaws
 
 
+def test_candidate_pruner_avoids_false_positive_bfla_on_user_endpoints():
+    """Verify unprivileged user endpoints are not misclassified as BFLA even with role hierarchy policies."""
+    ckg = CodeKnowledgeGraph()
+
+    r_user = RouteNode(
+        id="r_user",
+        method="GET",
+        path="/api/v1/users/{id}/profile",
+        file_path="users.py",
+        line_number=10,
+    )
+    s_user = SinkNode(id="s_user", operation="READ", entity="User", query_params=["id"])
+    ckg.add_node(r_user)
+    ckg.add_node(s_user)
+    ckg.add_edge(r_user.id, s_user.id, EdgeType.CALLS)
+
+    # Policy with role hierarchy containing standard user and customer roles
+    policies = BusinessPolicyMatrix(
+        ownership_rules=["Users own their profile"],
+        role_hierarchy=["customer", "guest"],
+        state_invariants=[],
+    )
+
+    pruner = CandidatePruner()
+    suspects = pruner.prune_candidates(ckg, policies=policies)
+    suspect_map = {s.route.id: s for s in suspects}
+
+    assert "r_user" in suspect_map
+    # Should be flagged for BOLA due to {id} access, but NOT for BFLA
+    assert "BOLA" in suspect_map["r_user"].candidate_flaws
+    assert "BFLA" not in suspect_map["r_user"].candidate_flaws
+
+
+def test_candidate_pruner_avoids_false_positive_workflow_on_get_orders():
+    """Verify read-only GET routes accessing entity do not trigger WORKFLOW state transition flaws."""
+    ckg = CodeKnowledgeGraph()
+
+    # Route 1: Read-only GET /orders/{id}
+    r_order_get = RouteNode(
+        id="r_order_get",
+        method="GET",
+        path="/api/v1/orders/{id}",
+        file_path="order.py",
+        line_number=10,
+    )
+    s_order_get = SinkNode(id="s_order_get", operation="READ", entity="Order", query_params=["id"])
+    ckg.add_node(r_order_get)
+    ckg.add_node(s_order_get)
+    ckg.add_edge(r_order_get.id, s_order_get.id, EdgeType.CALLS)
+
+    # Route 2: Mutating POST /orders/{id}/ship
+    r_order_ship = RouteNode(
+        id="r_order_ship",
+        method="POST",
+        path="/api/v1/orders/{id}/ship",
+        file_path="order.py",
+        line_number=30,
+    )
+    s_order_ship = SinkNode(id="s_order_ship", operation="UPDATE", entity="Order", query_params=["id"])
+    ckg.add_node(r_order_ship)
+    ckg.add_node(s_order_ship)
+    ckg.add_edge(r_order_ship.id, s_order_ship.id, EdgeType.CALLS)
+
+    policies = BusinessPolicyMatrix(
+        ownership_rules=[],
+        role_hierarchy=["admin", "user"],
+        state_invariants=["Order must be PAID before SHIP can be invoked"],
+    )
+
+    pruner = CandidatePruner()
+    suspects = pruner.prune_candidates(ckg, policies=policies)
+    suspect_map = {s.route.id: s for s in suspects}
+
+    # GET route should NOT be marked WORKFLOW
+    assert "r_order_get" in suspect_map
+    assert "WORKFLOW" not in suspect_map["r_order_get"].candidate_flaws
+    assert "BOLA" in suspect_map["r_order_get"].candidate_flaws
+
+    # POST /ship route MUST be marked WORKFLOW
+    assert "r_order_ship" in suspect_map
+    assert "WORKFLOW" in suspect_map["r_order_ship"].candidate_flaws
+
+
 def test_openapi_distillation():
     """Verify OpenAPI distillation strips redundant UI metadata and retains essential endpoints, auth, and schemas."""
     raw_openapi = {
@@ -411,6 +494,127 @@ def test_openapi_distillation():
     assert param["in"] == "path"
     assert "description" not in param
     assert "example" not in param.get("schema", {})
+
+
+def test_openapi_yaml_ingestion_and_distillation(tmp_path: Path):
+    """Verify OpenAPI YAML specifications are ingested and distilled properly."""
+    yaml_content = """
+openapi: 3.0.0
+info:
+  title: YAML API
+  description: Verbose UI description that must be removed.
+paths:
+  /api/v1/vouchers/{id}:
+    get:
+      summary: Retrieve voucher
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+      responses:
+        '200':
+          description: OK
+        '403':
+          description: Forbidden
+"""
+    yaml_file = tmp_path / "openapi.yaml"
+    yaml_file.write_text(yaml_content)
+
+    extractor = IntentExtractor()
+    docs = extractor.ingest_documentation(str(tmp_path))
+
+    assert len(docs["openapi"]) == 1
+    distilled = docs["openapi"][0]["spec"]
+    assert "/api/v1/vouchers/{id}" in distilled["paths"]
+    voucher_get = distilled["paths"]["/api/v1/vouchers/{id}"]["get"]
+    assert "200" in voucher_get["responses"]
+    assert "403" in voucher_get["responses"]
+    assert voucher_get["security"] == [{"apiKeyAuth": []}]
+
+
+def test_ingest_documentation_harvests_inline_docstrings(tmp_path: Path):
+    """Verify ingest_documentation harvests docstrings from source files and ignores non-source dirs."""
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+
+    # Python file with security-relevant docstrings
+    py_file = src_dir / "invoice_service.py"
+    py_file.write_text('''
+"""Invoices belong to the creating tenant. Cross-tenant invoice viewing is strictly forbidden."""
+
+def get_invoice(invoice_id):
+    """Ensure access permissions are verified before returning invoice data."""
+    return {"id": invoice_id}
+''')
+
+    # TypeScript file with JSDoc comment
+    ts_file = src_dir / "order_handler.ts"
+    ts_file.write_text('''
+/**
+ * @permission Role required: admin or merchant.
+ * State invariant: Order must transition to PAID status before dispatch.
+ */
+export function dispatchOrder(orderId: string) {
+    return true;
+}
+''')
+
+    # Tests dir should be ignored
+    test_dir = tmp_path / "tests"
+    test_dir.mkdir()
+    (test_dir / "test_dummy.py").write_text('"""Test invariant should be ignored."""')
+
+    extractor = IntentExtractor()
+    docs = extractor.ingest_documentation(str(tmp_path))
+
+    docstrings = docs.get("docstrings", [])
+    assert len(docstrings) >= 2
+
+    combined = " ".join(d["docstring"] for d in docstrings)
+    assert "Invoices belong to the creating tenant" in combined
+    assert "Order must transition to PAID" in combined
+    assert "Test invariant should be ignored" not in combined
+
+
+def test_ingest_documentation_with_ckg_handler_docstrings(tmp_path: Path):
+    """Verify HandlerNode docstring attributes in CKG are harvested into docstrings summary."""
+    ckg = CodeKnowledgeGraph()
+    handler = HandlerNode(
+        id="h_ship",
+        name="ship_order",
+        file_path="service.py",
+        docstring="Order must be PAID before SHIP can be invoked",
+    )
+    ckg.add_node(handler)
+
+    extractor = IntentExtractor()
+    docs = extractor.ingest_documentation(str(tmp_path), ckg=ckg)
+
+    assert any("PAID before SHIP" in d["docstring"] for d in docs["docstrings"])
+
+
+def test_deterministic_fallback_ignores_shell_redirections(tmp_path: Path):
+    """Verify lines with shell redirections are not misparsed as role hierarchies in fallback."""
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        "# Project Installation\n\n"
+        "Run the following command:\n"
+        "python main.py > output.txt\n"
+        "npm run build > build.log\n\n"
+        "## Security Roles\n"
+        "Role hierarchy: admin > merchant > customer\n"
+        "All invoices belong to tenant.\n"
+    )
+
+    extractor = IntentExtractor(llm_provider=None)
+    policies = extractor.extract_policies(str(tmp_path))
+
+    assert isinstance(policies, BusinessPolicyMatrix)
+    assert policies.role_hierarchy == ["admin", "merchant", "customer"]
+    assert "python main.py" not in policies.role_hierarchy
+    assert "output.txt" not in policies.role_hierarchy
 
 
 def test_intent_extractor_with_mock_llm(tmp_path: Path):
