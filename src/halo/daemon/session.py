@@ -56,6 +56,8 @@ class ScanSessionManager:
             "data": data or {},
         }
         self._history[scan_id].append(event)
+        if len(self._history[scan_id]) > 1000:
+            self._history[scan_id].pop(0)
 
         subscribers = list(self._subscribers.get(scan_id, []))
         for queue in subscribers:
@@ -128,16 +130,17 @@ class ScanSessionManager:
             )
         except asyncio.CancelledError:
             try:
-                scan = await self.db.get_scan(scan_id)
-                if scan is not None and scan.get("status") != "CANCELLED":
-                    await asyncio.shield(
-                        self.db.update_scan_status(
-                            scan_id,
-                            "CANCELLED",
-                            completed_at=datetime.now(UTC).isoformat(),
+                if getattr(self.db, "_conn", None) is not None:
+                    scan = await self.db.get_scan(scan_id)
+                    if scan is not None and scan.get("status") != "CANCELLED":
+                        await asyncio.shield(
+                            self.db.update_scan_status(
+                                scan_id,
+                                "CANCELLED",
+                                completed_at=datetime.now(UTC).isoformat(),
+                            )
                         )
-                    )
-                    await asyncio.shield(self.publish_progress(scan_id, "scan_cancelled", {}))
+                        await asyncio.shield(self.publish_progress(scan_id, "scan_cancelled", {}))
             except BaseException as e:  # noqa: BLE001
                 logger.debug(f"Error handling scan cancellation: {e}")
             raise
@@ -185,6 +188,10 @@ class ScanSessionManager:
                 return True
             return has_task
         return False
+
+    def get_task(self, scan_id: str) -> asyncio.Task[Any] | None:
+        """Return the active background asyncio Task for a scan, if any."""
+        return self._active_tasks.get(scan_id)
 
     def get_active_scans(self) -> list[str]:
         """Return list of active, uncompleted scan IDs."""

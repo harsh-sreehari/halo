@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -54,11 +55,17 @@ def create_app(
 
         yield
 
-        # Shutdown: cancel active background tasks and close database
+        # Shutdown: cancel active background tasks and await completion before closing database
         mgr: ScanSessionManager = getattr(app.state, "session_manager", None)
         if mgr is not None:
+            tasks = []
             for active_scan_id in mgr.get_active_scans():
-                await mgr.cancel_scan(active_scan_id)
+                task = mgr.get_task(active_scan_id)
+                if task is not None and not task.done():
+                    task.cancel()
+                    tasks.append(task)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         database: Database = getattr(app.state, "db", None)
         if database is not None:
@@ -146,6 +153,25 @@ def create_app(
             )
         return await database.get_findings(scan_id)
 
+    @app.get("/api/v1/findings")
+    async def list_findings(
+        scan_id: str | None = None,
+        severity: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """List findings across scans with optional filtering and pagination."""
+        database: Database = app.state.db
+        findings = await database.list_all_findings(
+            scan_id=scan_id, severity=severity, limit=limit, offset=offset
+        )
+        return {
+            "total": len(findings),
+            "limit": limit,
+            "offset": offset,
+            "findings": findings,
+        }
+
     @app.get("/api/v1/scans/{scan_id}/ckg")
     async def get_ckg(scan_id: str) -> dict[str, Any]:
         """Get Code Knowledge Graph snapshot for a given scan."""
@@ -170,13 +196,17 @@ def create_app(
     @app.websocket("/ws/scans/{scan_id}")
     async def websocket_scan_progress(websocket: WebSocket, scan_id: str) -> None:
         """Stream real-time progress events for a scan over WebSocket."""
-        await websocket.accept()
-
-        mgr: ScanSessionManager = app.state.session_manager
         database: Database = app.state.db
-
-        # Send current scan snapshot if available
         scan = await database.get_scan(scan_id)
+        if scan is None:
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION,
+                reason=f"Scan {scan_id} not found",
+            )
+            return
+
+        await websocket.accept()
+        mgr: ScanSessionManager = app.state.session_manager
         if scan is not None:
             await websocket.send_json(
                 {

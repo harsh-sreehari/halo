@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from halo.daemon.db import Database
 from halo.daemon.server import create_app
@@ -428,3 +429,95 @@ def test_server_websocket_streaming(tmp_path: Path):
             msg = ws.receive_json()
             assert "type" in msg
             assert msg["scan_id"] == scan_id
+
+
+def test_server_top_level_findings_endpoint(tmp_path: Path):
+    db_path = str(tmp_path / "test_findings_api.db")
+    db = Database(db_path)
+    session_manager = ScanSessionManager(db)
+    app = create_app(db=db, session_manager=session_manager)
+
+    with TestClient(app) as client:
+        # Create 2 scans
+        s1 = client.post("/api/v1/scans", json={"repo_path": "/repo1"}).json()["scan_id"]
+        s2 = client.post("/api/v1/scans", json={"repo_path": "/repo2"}).json()["scan_id"]
+
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(
+            db.add_finding(
+                s1,
+                {"id": "F1", "flaw_type": "BOLA", "endpoint": "/a", "severity": "HIGH"},
+            )
+        )
+        loop.run_until_complete(
+            db.add_finding(
+                s2,
+                {"id": "F2", "flaw_type": "BFLA", "endpoint": "/b", "severity": "CRITICAL"},
+            )
+        )
+        loop.run_until_complete(
+            db.add_finding(
+                s2,
+                {"id": "F3", "flaw_type": "RACE", "endpoint": "/c", "severity": "HIGH"},
+            )
+        )
+        loop.close()
+
+        # Query all findings
+        res = client.get("/api/v1/findings")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["total"] == 3
+        assert len(data["findings"]) == 3
+
+        # Filter by scan_id
+        res_s1 = client.get(f"/api/v1/findings?scan_id={s1}")
+        assert res_s1.status_code == 200
+        assert res_s1.json()["total"] == 1
+        assert res_s1.json()["findings"][0]["id"] == "F1"
+
+        # Filter by severity
+        res_crit = client.get("/api/v1/findings?severity=critical")
+        assert res_crit.status_code == 200
+        assert res_crit.json()["total"] == 1
+        assert res_crit.json()["findings"][0]["id"] == "F2"
+
+        # Pagination
+        res_page = client.get("/api/v1/findings?limit=2&offset=1")
+        assert res_page.status_code == 200
+        assert len(res_page.json()["findings"]) == 2
+
+
+def test_websocket_invalid_scan_rejected(tmp_path: Path):
+    db_path = str(tmp_path / "test_ws_reject.db")
+    db = Database(db_path)
+    session_manager = ScanSessionManager(db)
+    app = create_app(db=db, session_manager=session_manager)
+
+    with (
+        TestClient(app) as client,
+        pytest.raises(WebSocketDisconnect) as exc_info,
+        client.websocket_connect("/ws/scans/nonexistent-scan-id"),
+    ):
+        pass
+
+    assert exc_info.value.code == 1008
+
+
+def test_daemon_shutdown_cleanly_awaits_active_tasks(tmp_path: Path):
+    db_path = str(tmp_path / "test_shutdown.db")
+    db = Database(db_path)
+    session_manager = ScanSessionManager(db)
+    app = create_app(db=db, session_manager=session_manager)
+
+    with TestClient(app) as client:
+        # Start a scan with long running execution
+        res = client.post(
+            "/api/v1/scans", json={"repo_path": "/repo", "target_url": "http://127.0.0.1:3000"}
+        )
+        assert res.status_code == 201
+        scan_id = res.json()["scan_id"]
+        assert scan_id in session_manager.get_active_scans()
+    # Exiting TestClient context triggers app lifespan shutdown
+    # Active task should be cancelled and awaited cleanly without raising db connection errors
+    assert len(session_manager.get_active_scans()) == 0

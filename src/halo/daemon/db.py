@@ -88,6 +88,13 @@ class Database:
             """
         )
 
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_findings_scan_id ON findings(scan_id);"
+        )
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_findings_created_at ON findings(created_at);"
+        )
+
         await self._conn.commit()
 
     async def _get_conn(self) -> aiosqlite.Connection:
@@ -266,6 +273,45 @@ class Database:
             "SELECT * FROM findings WHERE scan_id = ? ORDER BY created_at ASC",
             (scan_id,),
         )
+        rows = await cursor.fetchall()
+        results = []
+        for r in rows:
+            item = dict(r)
+            if item.get("reproduction_steps"):
+                try:
+                    item["reproduction_steps"] = json.loads(item["reproduction_steps"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            results.append(item)
+        return results
+
+    async def list_all_findings(
+        self,
+        scan_id: str | None = None,
+        severity: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Fetch findings across scans with optional filtering and pagination."""
+        conn = await self._get_conn()
+        query = "SELECT * FROM findings"
+        params: list[Any] = []
+        clauses: list[str] = []
+
+        if scan_id:
+            clauses.append("scan_id = ?")
+            params.append(scan_id)
+        if severity:
+            clauses.append("UPPER(severity) = ?")
+            params.append(severity.upper())
+
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+
+        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        cursor = await conn.execute(query, tuple(params))
         rows = await cursor.fetchall()
         results = []
         for r in rows:
