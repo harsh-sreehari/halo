@@ -1,4 +1,4 @@
-; JavaScript & TypeScript Route & Handler SCM queries for HALO
+; TypeScript Route & Handler SCM queries for HALO
 
 ; Express route calls: app.get(...), router.post(...)
 (call_expression

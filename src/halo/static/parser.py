@@ -188,12 +188,22 @@ class CodeParser:
         scm_text: str
         is_file = False
         if not ("\n" in query_scm or query_scm.strip().startswith("(") or query_scm.strip().startswith(";")):
-            candidate = self.queries_dir / (query_scm if query_scm.endswith(".scm") else f"{query_scm}.scm")
-            if candidate.is_file():
-                scm_text = candidate.read_text(encoding="utf-8")
-                is_file = True
-            elif Path(query_scm).is_file():
-                scm_text = Path(query_scm).read_text(encoding="utf-8")
+            base_name = query_scm.removesuffix(".scm")
+            candidates = [
+                self.queries_dir / f"{base_name}.scm",
+                Path(query_scm),
+            ]
+            if base_name in ("typescript", "typescript.scm"):
+                candidates.append(self.queries_dir / "javascript.scm")
+
+            found_path: Path | None = None
+            for cand in candidates:
+                if cand.is_file():
+                    found_path = cand
+                    break
+
+            if found_path:
+                scm_text = found_path.read_text(encoding="utf-8")
                 is_file = True
             else:
                 scm_text = query_scm
@@ -542,7 +552,7 @@ class CodeParser:
                 args = obj_node.child_by_field_name("arguments")
                 if args:
                     for a in args.children:
-                        if a.type == "string":
+                        if a.type in ("string", "template_string"):
                             return self._strip_quotes(a.text.decode())
             # Recursive check if chained further: e.g. router.route(...).get(...)
             inner_obj = fn.child_by_field_name("object")
@@ -564,7 +574,7 @@ class CodeParser:
         for c in args_node.children:
             if c.type in ("(", ")", ","):
                 continue
-            if not raw_path and c.type == "string":
+            if not raw_path and c.type in ("string", "template_string"):
                 raw_path = self._strip_quotes(c.text.decode())
             else:
                 arg_nodes.append(c)
@@ -828,9 +838,9 @@ class CodeParser:
         )
 
     def _parse_php_action_handler(self, arg_node: Node) -> str:
-        text = arg_node.text.decode()
-        # Case 1: string e.g. 'InvoiceController@store'
-        if arg_node.children and arg_node.children[0].type == "string":
+        text = self._strip_quotes(arg_node.text.decode())
+        # Case 1: string or encapsed_string e.g. 'InvoiceController@store' or "InvoiceController@store"
+        if arg_node.children and arg_node.children[0].type in ("string", "encapsed_string"):
             return self._strip_quotes(text)
 
         # Case 2: array [InvoiceController::class, 'show']
@@ -843,7 +853,7 @@ class CodeParser:
                 ]
                 if elements:
                     cleaned_elements = [
-                        e.replace("::class", "") for e in elements
+                        self._strip_quotes(e.replace("::class", "")) for e in elements
                     ]
                     if len(cleaned_elements) == 2:
                         return f"{cleaned_elements[0]}@{cleaned_elements[1]}"
@@ -851,9 +861,9 @@ class CodeParser:
 
         # Case 3: class constant e.g. OrderController::class
         if "::class" in text:
-            return text.replace("::class", "").strip()
+            return self._strip_quotes(text.replace("::class", "")).strip()
 
-        return text.strip()
+        return self._strip_quotes(text)
 
     def _extract_php_handlers(
         self, tree: Tree, code_bytes: bytes, file_path: str
@@ -910,7 +920,11 @@ class CodeParser:
     @staticmethod
     def _strip_quotes(s: str) -> str:
         s = s.strip()
-        if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        if (
+            (s.startswith('"') and s.endswith('"'))
+            or (s.startswith("'") and s.endswith("'"))
+            or (s.startswith("`") and s.endswith("`"))
+        ):
             return s[1:-1]
         return s
 

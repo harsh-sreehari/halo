@@ -262,3 +262,85 @@ def test_parse_file_from_disk_with_extension_probing():
         assert res.language == "python"
         assert res.file_path == str(py_file)
         assert "ping" in res.code
+
+
+def test_all_authored_scm_queries():
+    parser = CodeParser()
+
+    # 1. python.scm
+    py_code = """
+@app.get("/items")
+def list_items():
+    pass
+"""
+    py_tree = parser.parse_file("app.py", code=py_code, language="python").tree
+    py_caps = parser.execute_query(py_tree, "python", "python.scm")
+    assert any(name == "route" for _, name in py_caps)
+
+    # 2. javascript.scm against JavaScript
+    js_code = """
+class AppController {}
+router.get('/users', authMw, getUser);
+"""
+    js_tree = parser.parse_file("app.js", code=js_code, language="javascript").tree
+    js_caps = parser.execute_query(js_tree, "javascript", "javascript.scm")
+    assert any(name == "route" for _, name in js_caps)
+    assert any(name == "class" for _, name in js_caps)
+
+    # 3. javascript.scm against TypeScript (verifying type_identifier / class_declaration)
+    ts_code = """
+class TsController {}
+router.get('/ts-items', getTsItems);
+"""
+    ts_tree = parser.parse_file("app.ts", code=ts_code, language="typescript").tree
+    ts_caps = parser.execute_query(ts_tree, "typescript", "javascript.scm")
+    assert any(name == "route" for _, name in ts_caps)
+    assert any(name == "class" for _, name in ts_caps)
+
+    # 4. typescript.scm and alias "typescript" against TypeScript
+    ts_caps_alias = parser.execute_query(ts_tree, "typescript", "typescript")
+    assert any(name == "route" for _, name in ts_caps_alias)
+
+    # 5. php.scm
+    php_code = """<?php
+class Controller {}
+Route::get('/orders', 'OrderController@index');
+"""
+    php_tree = parser.parse_file("routes.php", code=php_code, language="php").tree
+    php_caps = parser.execute_query(php_tree, "php", "php.scm")
+    assert any(name == "route" for _, name in php_caps)
+
+
+def test_php_double_quoted_action_handler():
+    code = '''<?php
+Route::get("/invoices", "InvoiceController@show");
+Route::post("/orders", ["App\\Controllers\\OrderController", "store"]);
+'''
+    parser = CodeParser()
+    routes = parser.extract_routes("routes.php", code, language="php")
+    assert len(routes) == 2
+    assert routes[0].path == "/invoices"
+    assert routes[0].handler_name == "InvoiceController@show"
+    assert '"' not in routes[0].handler_name
+
+    assert routes[1].path == "/orders"
+    assert routes[1].handler_name == "App\\Controllers\\OrderController@store"
+    assert '"' not in routes[1].handler_name
+
+
+def test_js_ts_template_literal_routes():
+    code = """
+router.get(`/invoices/:id`, authMiddleware, getInvoiceHandler);
+router.route(`/api/v1/orders`).post(createOrderHandler);
+"""
+    parser = CodeParser()
+    routes = parser.extract_routes("routes.ts", code, language="typescript")
+    assert len(routes) == 2
+    assert routes[0].path == "/invoices/:id"
+    assert routes[0].handler_name == "getInvoiceHandler"
+    assert routes[0].middleware == ["authMiddleware"]
+
+    assert routes[1].path == "/api/v1/orders"
+    assert routes[1].method == "POST"
+    assert routes[1].handler_name == "createOrderHandler"
+
