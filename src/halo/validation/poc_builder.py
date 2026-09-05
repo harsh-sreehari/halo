@@ -50,10 +50,12 @@ Target: {safe_target}
 Details:
 {doc_details}
 """
+import os
 import sys
 import httpx
 
-BASE_URL = {json.dumps(safe_target)}
+BASE_URL = os.environ.get("HALO_TARGET_URL", {json.dumps(safe_target)})
+
 
 
 def test_reproduction():
@@ -102,9 +104,11 @@ if __name__ == "__main__":
         # Persona tokens
         tok_a = (tokens or {}).get("USER_A", "halo_token_user_a")
         tok_b = (tokens or {}).get("USER_B", "halo_token_user_b")
+        tok_admin = (tokens or {}).get("ADMIN", "halo_token_admin")
         lines.append(f"{indent}# 1. Setup Test Persona Headers")
         lines.append(f'{indent}headers_user_a = {{"Authorization": "Bearer {tok_a}"}}')
         lines.append(f'{indent}headers_user_b = {{"Authorization": "Bearer {tok_b}"}}')
+        lines.append(f'{indent}headers_admin = {{"Authorization": "Bearer {tok_admin}"}}')
         lines.append(f'{indent}victim_id = "1"')
         lines.append("")
 
@@ -122,7 +126,12 @@ if __name__ == "__main__":
         for i, step in enumerate(steps, start=1):
             actor_raw = step.get("as") or step.get("actor") or "user_a"
             actor = str(actor_raw).lower()
-            headers_var = f"headers_{actor}" if "b" in actor else "headers_user_a"
+            if "admin" in actor:
+                headers_var = "headers_admin"
+            elif "b" in actor:
+                headers_var = "headers_user_b"
+            else:
+                headers_var = "headers_user_a"
             action_raw = step.get("action", "")
             step_path = step.get("path", "")
             body = step.get("body") if "body" in step else step.get("payload")
@@ -140,7 +149,9 @@ if __name__ == "__main__":
                 parsed_method = "POST"
             elif action_raw.lower() in ("read", "get"):
                 parsed_method = "GET"
-            elif action_raw.lower() in ("update", "put", "patch"):
+            elif action_raw.lower() == "patch":
+                parsed_method = "PATCH"
+            elif action_raw.lower() in ("update", "put"):
                 parsed_method = "PUT"
             elif action_raw.lower() in ("delete",):
                 parsed_method = "DELETE"

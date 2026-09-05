@@ -103,7 +103,7 @@ def test_poc_builder_generates_pep723():
     assert 'dependencies = ["httpx"]' in script
     assert "# ///" in script
     assert "def test_reproduction():" in script
-    assert 'BASE_URL = "http://localhost:3000"' in script
+    assert 'BASE_URL = os.environ.get("HALO_TARGET_URL", "http://localhost:3000")' in script
     assert 'client.post("/api/v1/invoices"' in script
     assert "assert " in script
     assert 'if __name__ == "__main__":' in script
@@ -222,6 +222,74 @@ def test_poc_builder_bfla_and_race_flaws():
     assert "RACE_CONDITION" in race_script
     assert "def test_reproduction():" in race_script
     ast.parse(race_script)
+
+
+def test_poc_builder_explicit_actor_header_mapping():
+    """Verify actor headers map explicitly to predefined variables without undefined references."""
+    builder = PoCBuilder()
+    script = builder.build_script(
+        finding_id="ACTOR_01",
+        flaw_type="BOLA_IDOR",
+        endpoint="/api/v1/items",
+        target_url="http://localhost:3000",
+        steps=[
+            {
+                "action": "create",
+                "as": "USER_B",
+                "path": "/api/v1/items",
+                "body": {"name": "Test"},
+            },
+            {
+                "action": "create",
+                "as": "bob",
+                "path": "/api/v1/items",
+                "body": {"name": "BobItem"},
+            },
+            {"action": "read", "as": "ADMIN", "path": "/api/v1/items/1"},
+            {"action": "read", "as": "USER_A", "path": "/api/v1/items/1"},
+        ],
+    )
+    assert "headers_user_b" in script
+    assert "headers_admin" in script
+    assert "headers_user_a" in script
+    assert "headers_bob" not in script
+    ast.parse(script)
+
+
+def test_poc_builder_patch_http_verb():
+    """Verify HTTP PATCH verb is preserved rather than coerced to PUT."""
+    builder = PoCBuilder()
+    script = builder.build_script(
+        finding_id="PATCH_01",
+        flaw_type="BOLA_IDOR",
+        endpoint="/api/v1/users/1",
+        target_url="http://localhost:3000",
+        steps=[
+            {
+                "action": "patch",
+                "as": "USER_A",
+                "path": "/api/v1/users/1",
+                "body": {"role": "admin"},
+            },
+        ],
+    )
+    assert "client.patch(" in script
+    assert "client.put(" not in script
+    ast.parse(script)
+
+
+def test_poc_builder_env_target_url_override():
+    """Verify generated script allows overriding target URL via HALO_TARGET_URL environment variable."""
+    builder = PoCBuilder()
+    script = builder.build_script(
+        finding_id="ENV_01",
+        flaw_type="BOLA_IDOR",
+        endpoint="/api/v1/test",
+        target_url="http://original.target",
+        steps=[],
+    )
+    assert 'BASE_URL = os.environ.get("HALO_TARGET_URL", "http://original.target")' in script
+    ast.parse(script)
 
 
 # ---------------------------------------------------------------------------
