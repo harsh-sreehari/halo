@@ -228,3 +228,80 @@ def test_nonexistent_route_query():
     assert trace["edges"] == []
     sinks = ckg.find_candidate_sinks("unknown_route")
     assert sinks == []
+
+
+def test_handler_name_authorization_heuristic():
+    ckg = CodeKnowledgeGraph()
+    # Business logic handler with "authorize" in its name, but NOT a guard
+    route_pay = RouteNode(id="r_pay", method="POST", path="/pay", file_path="r.py")
+    handler_pay = HandlerNode(id="h_pay", name="authorize_payment", file_path="c.py")
+    sink_pay = SinkNode(id="s_pay", operation="CREATE", entity="Payment")
+
+    ckg.add_node(route_pay)
+    ckg.add_node(handler_pay)
+    ckg.add_node(sink_pay)
+    ckg.add_edge(route_pay.id, handler_pay.id, EdgeType.ROUTES_TO)
+    ckg.add_edge(handler_pay.id, sink_pay.id, EdgeType.CALLS)
+
+    # authorize_payment should NOT be treated as an authorization guard
+    sinks = ckg.find_candidate_sinks("r_pay")
+    assert len(sinks) == 1
+    assert sinks[0].id == "s_pay"
+
+    # Now test an actual guard handler like check_authorization
+    route_chk = RouteNode(id="r_chk", method="GET", path="/secret", file_path="r.py")
+    handler_guard = HandlerNode(id="h_guard", name="check_authorization", file_path="c.py")
+    sink_secret = SinkNode(id="s_secret", operation="READ", entity="Secret")
+
+    ckg.add_node(route_chk)
+    ckg.add_node(handler_guard)
+    ckg.add_node(sink_secret)
+    ckg.add_edge(route_chk.id, handler_guard.id, EdgeType.ROUTES_TO)
+    ckg.add_edge(handler_guard.id, sink_secret.id, EdgeType.CALLS)
+
+    sinks_chk = ckg.find_candidate_sinks("r_chk")
+    assert len(sinks_chk) == 0
+
+
+def test_route_level_protected_by_guard():
+    ckg = CodeKnowledgeGraph()
+    route = RouteNode(id="r_admin", method="GET", path="/admin/users", file_path="r.py")
+    guard_mw = MiddlewareNode(id="mw_authz", name="adminGuard", type="AUTHZ")
+    handler = HandlerNode(id="h_users", name="get_users", file_path="c.py")
+    sink = SinkNode(id="s_users", operation="READ", entity="User")
+
+    ckg.add_node(route)
+    ckg.add_node(guard_mw)
+    ckg.add_node(handler)
+    ckg.add_node(sink)
+
+    ckg.add_edge(route.id, guard_mw.id, EdgeType.PROTECTED_BY)
+    ckg.add_edge(route.id, handler.id, EdgeType.ROUTES_TO)
+    ckg.add_edge(handler.id, sink.id, EdgeType.CALLS)
+
+    assert ckg.is_route_guarded("r_admin") is True
+    # By default exclude_guarded=True, should return empty list
+    assert ckg.find_candidate_sinks("r_admin") == []
+    # If exclude_guarded=False, sink is still reachable
+    sinks_included = ckg.find_candidate_sinks("r_admin", exclude_guarded=False)
+    assert len(sinks_included) == 1
+    assert sinks_included[0].id == "s_users"
+
+    # Non-guard middleware (e.g. RATE_LIMIT) does NOT guard the route
+    route2 = RouteNode(id="r_public", method="GET", path="/public", file_path="r.py")
+    rate_mw = MiddlewareNode(id="mw_rate", name="rateLimiter", type="RATE_LIMIT")
+    handler2 = HandlerNode(id="h_pub", name="get_public", file_path="c.py")
+    sink2 = SinkNode(id="s_pub", operation="READ", entity="PublicData")
+
+    ckg.add_node(route2)
+    ckg.add_node(rate_mw)
+    ckg.add_node(handler2)
+    ckg.add_node(sink2)
+
+    ckg.add_edge(route2.id, rate_mw.id, EdgeType.PROTECTED_BY)
+    ckg.add_edge(route2.id, handler2.id, EdgeType.ROUTES_TO)
+    ckg.add_edge(handler2.id, sink2.id, EdgeType.CALLS)
+
+    assert ckg.is_route_guarded("r_public") is False
+    assert len(ckg.find_candidate_sinks("r_public")) == 1
+

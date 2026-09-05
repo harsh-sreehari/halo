@@ -109,10 +109,24 @@ def is_authorization_guard(node: BaseNode | None) -> bool:
             return True
     elif isinstance(node, HandlerNode):
         name_lower = node.name.lower()
-        if any(
-            token in name_lower
-            for token in ("isowner", "hasrole", "has_role", "is_owner", "check_permission", "require_permission", "authoriz")
-        ):
+        guard_patterns = (
+            "check_authoriz",
+            "is_authoriz",
+            "verify_authoriz",
+            "require_authoriz",
+            "has_role",
+            "hasrole",
+            "has_permission",
+            "haspermission",
+            "is_owner",
+            "isowner",
+            "ensure_access",
+            "assert_perm",
+            "check_permission",
+            "require_permission",
+            "verify_permission",
+        )
+        if any(token in name_lower for token in guard_patterns):
             return True
     return False
 
@@ -178,7 +192,7 @@ class CodeKnowledgeGraph:
             # Traversal halting criteria
             if curr_id != route_id:
                 # Halt if SinkNode is reached
-                if isinstance(curr_node, SinkNode) or (curr_node and curr_node.node_type == NodeType.SINK):
+                if isinstance(curr_node, SinkNode):
                     continue
                 # Halt if explicit authorization guard is encountered
                 if is_authorization_guard(curr_node):
@@ -204,18 +218,48 @@ class CodeKnowledgeGraph:
             "edges": ordered_edges,
         }
 
-    def find_candidate_sinks(self, route_id: str, max_depth: int = 5) -> list[SinkNode]:
+    def is_route_guarded(self, route_id: str) -> bool:
+        """
+        Check whether a route is protected by an explicit authorization guard
+        via a PROTECTED_BY edge or an explicit guard flag.
+        """
+        route_node = self.get_node(route_id)
+        if route_node is None:
+            return False
+        if getattr(route_node, "is_auth_guard", False):
+            return True
+        for succ_id in self.graph.successors(route_id):
+            edge_data = self.graph.get_edge_data(route_id, succ_id) or {}
+            edge_type = edge_data.get("edge_type")
+            if edge_type in (EdgeType.PROTECTED_BY, EdgeType.PROTECTED_BY.value):
+                succ_node = self.get_node(succ_id)
+                if is_authorization_guard(succ_node):
+                    return True
+        return False
+
+    def find_candidate_sinks(
+        self,
+        route_id: str,
+        max_depth: int = 5,
+        exclude_guarded: bool = True,
+    ) -> list[SinkNode]:
         """
         Find all reachable data sinks from a route within max_depth hops
         that are not blocked by authorization guards.
+
+        If exclude_guarded is True and the route is protected by an authorization
+        guard via a PROTECTED_BY edge, returns an empty list.
         """
+        if exclude_guarded and self.is_route_guarded(route_id):
+            return []
+
         trace = self.get_route_trace(route_id, max_depth=max_depth)
         sinks: list[SinkNode] = []
         seen_sink_ids: set[str] = set()
         for node in trace["nodes"]:
-            if (isinstance(node, SinkNode) or (node and node.node_type == NodeType.SINK)) and (node.id not in seen_sink_ids):
+            if isinstance(node, SinkNode) and (node.id not in seen_sink_ids):
                 seen_sink_ids.add(node.id)
-                sinks.append(node)  # type: ignore[arg-type]
+                sinks.append(node)
         return sinks
 
     def get_nodes_by_type(self, node_type: NodeType) -> list[BaseNode]:
