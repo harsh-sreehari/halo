@@ -1,6 +1,7 @@
 """Unit test for Halo CLI initialization."""
 
 from typer.testing import CliRunner
+
 from halo.cli.main import app
 
 runner = CliRunner()
