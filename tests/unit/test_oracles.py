@@ -85,6 +85,57 @@ def test_wire_oracle_nested_data_leakage():
     assert not any("avatar" in t for t in tokens)
 
 
+def test_wire_oracle_underscore_fields_not_public():
+    """Verify fields containing underscores like session_id or token_id are NOT treated as public."""
+    oracle = WireOracle()
+    victim_private = {
+        "session_id": "sess_secret_val_999",
+        "token_id": "tok_priv_888",
+        "secret_name": "top_secret_project",
+    }
+    attacker_response = {
+        "session_id": "sess_secret_val_999",
+        "token_id": "tok_priv_888",
+    }
+    leaked, tokens = oracle.check_token_leakage(victim_private, attacker_response)
+    assert leaked is True
+    assert "session_id" in tokens
+    assert "token_id" in tokens
+
+
+def test_wire_oracle_preserves_numeric_zero():
+    """Verify WireOracle preserves integer 0 in victim data rather than dropping it."""
+    oracle = WireOracle()
+    victim_private = {
+        "credits": 0,
+        "bonus_points": 50,
+    }
+    attacker_response = {
+        "id": "u1",
+        "credits": 0,
+    }
+    leaked, tokens = oracle.check_token_leakage(victim_private, attacker_response)
+    assert leaked is True
+    assert "credits" in tokens
+
+
+def test_wire_oracle_structured_json_no_raw_fallback_leak():
+    """Verify structured JSON responses do not trigger raw string fallback on public fields."""
+    oracle = WireOracle()
+    # Victim has private id_code that happens to match public user id
+    victim_private = {
+        "secret_code": "user_public_id_123",
+    }
+    # Attacker response is structured JSON with public username/id matching the string
+    attacker_response = {
+        "id": "user_public_id_123",  # Public field - should NOT match secret_code
+        "username": "victim",
+    }
+    leaked, tokens = oracle.check_token_leakage(victim_private, attacker_response)
+    assert leaked is False
+    assert tokens == []
+
+
 def test_wire_oracle_state_mutation_detected():
     """Verify WireOracle confirms unauthorized state mutation verified on victim read."""
     oracle = WireOracle()
@@ -141,6 +192,30 @@ def test_wire_oracle_state_mutation_no_change():
     assert res == False
 
 
+def test_wire_oracle_transient_timestamp_ignored_in_state_mutation():
+    """Verify transient fields (updated_at, timestamp, etag) do not trigger false state mutation."""
+    oracle = WireOracle()
+    baseline = {
+        "id": "item_123",
+        "title": "Original Title",
+        "updated_at": "2026-09-06T10:00:00Z",
+        "etag": "W/111",
+    }
+    attacker_mutation_res = {
+        "status": 200,
+    }
+    victim_verify = {
+        "id": "item_123",
+        "title": "Original Title",
+        "updated_at": "2026-09-06T10:05:00Z",  # Auto-updated timestamp
+        "etag": "W/222",  # Auto-updated etag
+    }
+    res = oracle.check_state_mutation(baseline, attacker_mutation_res, victim_verify)
+    mutated, fields = res
+    assert mutated is False
+    assert fields == []
+
+
 def test_wire_oracle_state_mutation_resource_deleted():
     """Verify WireOracle detects deletion of resource as state mutation."""
     oracle = WireOracle()
@@ -183,15 +258,10 @@ def test_semantic_differ_graphql_embedded_error_is_benign():
 
     res = oracle.evaluate_ambiguous_response(victim_view, attacker_view, llm)
     assert isinstance(res, SemanticDifferResult)
-    is_vuln, reasoning, confidence = res
+    is_vuln, reasoning = res
     assert is_vuln is False
-    assert confidence >= 0.85
+    assert res.confidence >= 0.85
     assert any(term in reasoning.lower() for term in ["error", "denied", "forbidden", "graphql"])
-
-    # Verify 2-tuple unpacking compatibility
-    unpacked_vuln, unpacked_reason = res
-    assert unpacked_vuln is False
-    assert unpacked_reason == reasoning
 
 
 def test_semantic_differ_masked_json_is_benign():
@@ -212,11 +282,10 @@ def test_semantic_differ_masked_json_is_benign():
         "billing_address": None,
     }
 
-    is_vuln, reasoning, confidence = oracle.evaluate_ambiguous_response(
-        victim_view, attacker_view, llm
-    )
+    res = oracle.evaluate_ambiguous_response(victim_view, attacker_view, llm)
+    is_vuln, reasoning = res
     assert is_vuln is False
-    assert confidence >= 0.85
+    assert res.confidence >= 0.85
     assert any(term in reasoning.lower() for term in ["mask", "null", "redact", "benign"])
 
 
@@ -228,11 +297,10 @@ def test_semantic_differ_empty_collection_is_benign():
     victim_view = {"orders": [{"id": "ord_1", "total": 1200, "secret_notes": "VIP Client"}]}
     attacker_view = {"orders": []}
 
-    is_vuln, reasoning, confidence = oracle.evaluate_ambiguous_response(
-        victim_view, attacker_view, llm
-    )
+    res = oracle.evaluate_ambiguous_response(victim_view, attacker_view, llm)
+    is_vuln, reasoning = res
     assert is_vuln is False
-    assert confidence >= 0.90
+    assert res.confidence >= 0.90
     assert any(term in reasoning.lower() for term in ["empty", "tenant", "filter", "isolate"])
 
 
@@ -278,3 +346,58 @@ def test_semantic_differ_duel_prompts_executed():
     assert any(
         "defender" in sp.lower() or "devil's advocate" in sp.lower() for sp in system_prompts
     )
+
+
+def test_semantic_differ_custom_excluded_fields():
+    """Verify SemanticDifferOracle respects custom excluded_fields passed in constructor."""
+    # Custom configuration where 'custom_public_badge' is treated as public
+    oracle = SemanticDifferOracle(excluded_fields={"custom_public_badge", "id"})
+    llm = MockLLMProvider()
+
+    victim_view = {"id": 1, "custom_public_badge": "VIP_MEMBER"}
+    attacker_view = {"id": 1, "custom_public_badge": "VIP_MEMBER"}
+
+    res = oracle.evaluate_ambiguous_response(victim_view, attacker_view, llm)
+    assert res.is_vulnerable is False
+    assert "public" in res.reasoning.lower()
+
+
+def test_semantic_differ_evaluates_duel_arguments():
+    """Verify SemanticDifferOracle mediator inspects and incorporates prosecutor/defender arguments."""
+    llm = MockLLMProvider()
+    # Provide custom canned responses for prosecutor and defender
+    llm.set_response(
+        "Argue why the attacker view represents unauthorized data exposure",
+        "The salary field of 150000 is exposed across tenant boundary, compromising private financial records.",
+    )
+    llm.set_response(
+        "Argue why the attacker view is benign",
+        "The response appears to be a legitimate employee directory listing with standard public data.",
+    )
+
+    oracle = SemanticDifferOracle()
+    victim_view = {"id": 42, "salary": 150000}
+    attacker_view = {"id": 42, "salary": 150000}
+
+    res = oracle.evaluate_ambiguous_response(victim_view, attacker_view, llm)
+    assert res.is_vulnerable is True
+    # Verify the mediator evaluated and quoted the prosecutor argument
+    assert "salary" in res.reasoning
+    assert "prosecutor" in res.reasoning.lower()
+
+
+def test_semantic_differ_result_clean_2_tuple():
+    """Verify SemanticDifferResult conforms directly to tuple[bool, str] with confidence attribute."""
+    res = SemanticDifferResult(True, "Access control violation verified", 0.95)
+    # Direct 2-tuple unpacking
+    is_vuln, reason = res
+    assert is_vuln is True
+    assert reason == "Access control violation verified"
+    assert len(res) == 2
+    assert res.confidence == 0.95
+    assert res.is_vulnerable is True
+    assert res.reasoning == "Access control violation verified"
+    assert bool(res) is True
+    assert res == (True, "Access control violation verified")
+    assert res == (True, "Access control violation verified", 0.95)
+    assert res == True

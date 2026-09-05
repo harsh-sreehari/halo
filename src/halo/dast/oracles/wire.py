@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any, Self
 
 logger = logging.getLogger(__name__)
@@ -56,6 +55,25 @@ DEFAULT_SENSITIVE_PATTERNS: frozenset[str] = frozenset(
         "refresh_token",
         "bearer_token",
         "private_key",
+    }
+)
+
+DEFAULT_TRANSIENT_FIELDS: frozenset[str] = frozenset(
+    {
+        "updated_at",
+        "updatedat",
+        "last_updated",
+        "timestamp",
+        "created_at",
+        "createdat",
+        "etag",
+        "_etag",
+        "request_id",
+        "requestid",
+        "trace_id",
+        "traceid",
+        "client_ip",
+        "access_time",
     }
 )
 
@@ -121,6 +139,7 @@ class WireOracle:
         self,
         excluded_fields: set[str] | None = None,
         sensitive_patterns: set[str] | None = None,
+        transient_fields: set[str] | None = None,
     ) -> None:
         self.excluded_fields = (
             {f.lower() for f in excluded_fields}
@@ -132,18 +151,31 @@ class WireOracle:
             if sensitive_patterns is not None
             else set(DEFAULT_SENSITIVE_PATTERNS)
         )
+        self.transient_fields = (
+            {t.lower() for t in transient_fields}
+            if transient_fields is not None
+            else set(DEFAULT_TRANSIENT_FIELDS)
+        )
 
     def _is_public_field(self, field_name: str) -> bool:
         name = field_name.lower().strip()
         if name in self.excluded_fields:
             return True
-        last_seg = re.split(r"[._]", name)[-1]
+        # Only split on dot path notation, never on underscores
+        last_seg = name.split(".")[-1].strip()
         return last_seg in self.excluded_fields
+
+    def _is_transient_field(self, field_name: str) -> bool:
+        name = field_name.lower().strip()
+        if name in self.transient_fields:
+            return True
+        last_seg = name.split(".")[-1].strip()
+        return last_seg in self.transient_fields
 
     def check_token_leakage(
         self,
         victim_sensitive_data: dict[str, Any],
-        attacker_response_body: dict[str, Any] | str,
+        attacker_response_body: dict[str, Any] | list[Any] | str,
     ) -> tuple[bool, list[str]]:
         """Checks if private victim fields appear in attacker response.
 
@@ -153,40 +185,49 @@ class WireOracle:
         leaked_tokens: list[str] = []
         victim_leaves = _flatten_leaves(victim_sensitive_data)
 
-        # Handle attacker response payload
+        # Distinguish structured JSON from unparseable raw text/HTML
         attacker_dict: dict[str, Any] | None = None
-        attacker_raw_str: str = ""
+        raw_text_only: str | None = None
 
         if isinstance(attacker_response_body, dict):
             attacker_dict = attacker_response_body
-            attacker_raw_str = json.dumps(attacker_response_body)
+        elif isinstance(attacker_response_body, (list, tuple)):
+            attacker_dict = {"_items": list(attacker_response_body)}
         elif isinstance(attacker_response_body, str):
-            attacker_raw_str = attacker_response_body
             try:
                 parsed = json.loads(attacker_response_body)
                 if isinstance(parsed, dict):
                     attacker_dict = parsed
+                elif isinstance(parsed, list):
+                    attacker_dict = {"_items": parsed}
+                else:
+                    raw_text_only = attacker_response_body
             except (json.JSONDecodeError, ValueError):
-                attacker_dict = None
-
-        attacker_leaves = _flatten_leaves(attacker_dict) if attacker_dict is not None else []
+                raw_text_only = attacker_response_body
 
         for _path, leaf_key, val in victim_leaves:
             # Exclude public fields
             if self._is_public_field(leaf_key):
                 continue
 
-            # Ignore empty or trivial values
-            if val is None or val == "" or val is False or val == [] or val == {}:
+            # Ignore empty or trivial values, but preserve numeric 0
+            if (
+                val is None
+                or val == ""
+                or (isinstance(val, bool) and not val)
+                or val == []
+                or val == {}
+            ):
                 continue
 
             str_val = str(val)
             val_leaked = False
 
-            # 1. Check against structured attacker leaves
-            if attacker_leaves:
+            # Check structured attacker leaves when JSON parsed successfully
+            if attacker_dict is not None:
+                attacker_leaves = _flatten_leaves(attacker_dict)
                 for _att_path, att_key, att_val in attacker_leaves:
-                    # If the attacker key is a public profile field, skip matching on it
+                    # Skip matching within public profile fields
                     if self._is_public_field(att_key):
                         continue
                     if att_val == val:
@@ -195,14 +236,8 @@ class WireOracle:
                     if isinstance(att_val, str) and len(str_val) >= 3 and str_val in att_val:
                         val_leaked = True
                         break
-
-            # 2. Check against raw body string
-            if (
-                not val_leaked
-                and attacker_raw_str
-                and len(str_val) >= 3
-                and str_val in attacker_raw_str
-            ):
+            # Only run raw string search when response is unparseable text/HTML
+            elif raw_text_only is not None and len(str_val) >= 3 and str_val in raw_text_only:
                 val_leaked = True
 
             if val_leaked and leaf_key not in leaked_tokens:
@@ -218,23 +253,40 @@ class WireOracle:
     ) -> StateMutationResult:
         """Confirms User_A's unauthorized mutation is verified in a subsequent User_B read.
 
-        Compares field modifications against baseline. Returns StateMutationResult.
+        Compares field modifications against baseline, filtering transient fields and
+        verifying against attacker mutation response. Returns StateMutationResult.
         """
+        # 1. Check if attacker mutation explicitly failed or was rejected on the wire
+        if isinstance(attacker_mutation_res, dict):
+            status = attacker_mutation_res.get("status")
+            if isinstance(status, int) and (status >= 400 or status < 200):
+                return StateMutationResult(False, [])
+            if attacker_mutation_res.get("success") is False:
+                return StateMutationResult(False, [])
+            if "error" in attacker_mutation_res and not attacker_mutation_res.get("success"):
+                return StateMutationResult(False, [])
+
         modified_fields: list[str] = []
 
-        # Check for resource deletion
+        # 2. Check for resource deletion
         if baseline_read and (
             not victim_verify_read
             or victim_verify_read.get("status") in (404, "not_found", "deleted")
             or victim_verify_read.get("error") in ("Not Found", "Resource not found")
         ):
-            modified_fields.extend(k for k in baseline_read if not self._is_public_field(k))
+            modified_fields.extend(
+                k
+                for k in baseline_read
+                if not self._is_public_field(k) and not self._is_transient_field(k)
+            )
             if not modified_fields:
                 modified_fields.append("__deleted__")
             return StateMutationResult(True, modified_fields)
 
-        # Compare baseline against victim verify read
+        # 3. Compare baseline against victim verify read, skipping transient fields
         for k, v in baseline_read.items():
+            if self._is_transient_field(k):
+                continue
             if k in victim_verify_read:
                 if victim_verify_read[k] != v:
                     modified_fields.append(k)
@@ -242,8 +294,24 @@ class WireOracle:
                 modified_fields.append(k)
 
         for k in victim_verify_read:
+            if self._is_transient_field(k):
+                continue
             if k not in baseline_read:
                 modified_fields.append(k)
+
+        # 4. Verify against attacker_mutation_res when specific mutation payload provided
+        if modified_fields and isinstance(attacker_mutation_res, dict):
+            attacker_payload_fields = [
+                k
+                for k in attacker_mutation_res
+                if not self._is_transient_field(k)
+                and k not in ("id", "_id", "status", "success", "message", "ok", "deleted")
+            ]
+            if attacker_payload_fields:
+                matched = [f for f in modified_fields if f in attacker_payload_fields]
+                if matched:
+                    return StateMutationResult(True, matched)
+                return StateMutationResult(False, [])
 
         mutated = len(modified_fields) > 0
         return StateMutationResult(mutated, modified_fields)
