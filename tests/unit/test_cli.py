@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import tempfile
-from unittest.mock import MagicMock, patch
+from pathlib import Path
+from unittest.mock import patch
 
-import pytest
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -53,9 +52,7 @@ def test_cli_sast_command():
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         (root / "app.py").write_text(
-            "@app.get('/api/v1/invoices/{id}')\n"
-            "def get_invoice(id: int):\n"
-            "    return {'id': id}\n"
+            "@app.get('/api/v1/invoices/{id}')\ndef get_invoice(id: int):\n    return {'id': id}\n"
         )
         out_ckg = root / "ckg.json"
         res = runner.invoke(app, ["sast", "--repo", str(root), "--out", str(out_ckg)])
@@ -141,6 +138,12 @@ def test_cli_scan_command_with_url_and_findings():
             assert "# /// script" in poc_content
             assert 'dependencies = ["httpx"]' in poc_content
 
+            # Verify remediation patch file generated
+            patch_files = list(out_dir.glob("patch_*.md"))
+            assert len(patch_files) >= 1
+            patch_content = patch_files[0].read_text()
+            assert "### Remediation" in patch_content
+
 
 def test_cli_dast_command():
     """Verify dast command probes target URL and produces reports."""
@@ -165,7 +168,7 @@ def test_cli_dast_command():
                     "dast",
                     "--url",
                     "http://localhost:8000",
-                    "--output-dir",
+                    "--out",
                     str(out_dir),
                 ],
             )
@@ -173,6 +176,8 @@ def test_cli_dast_command():
             assert (out_dir / "halo_report.json").exists()
             assert (out_dir / "halo_report.sarif").exists()
             assert (out_dir / "halo_report.md").exists()
+            assert len(list(out_dir.glob("repro_*.py"))) >= 1
+            assert len(list(out_dir.glob("patch_*.md"))) >= 1
 
 
 def test_cli_daemon_command():
@@ -345,9 +350,7 @@ def test_cli_dast_command_with_repo():
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         (root / "routes.py").write_text(
-            "@app.get('/api/v1/admin/audit')\n"
-            "def audit_log():\n"
-            "    return {'audit': 'log'}\n"
+            "@app.get('/api/v1/admin/audit')\ndef audit_log():\n    return {'audit': 'log'}\n"
         )
         out_dir = root / "dast_out"
 
@@ -383,7 +386,10 @@ def test_cli_scan_docker_fallback():
         (root / "main.py").write_text("@app.get('/health')\ndef health(): return {}\n")
         out_dir = root / "out"
 
-        with patch("halo.dast.sandbox.SandboxManager.boot_sandbox", side_effect=RuntimeError("Docker daemon offline")):
+        with patch(
+            "halo.dast.sandbox.SandboxManager.boot_sandbox",
+            side_effect=RuntimeError("Docker daemon offline"),
+        ):
             res = runner.invoke(
                 app,
                 [
@@ -415,3 +421,90 @@ def test_ui_empty_collections():
     assert "All routes verified safe / pruned" in out
     assert "CLEAN" in out
 
+
+def test_cli_scan_executes_workflow_and_race_probes():
+    """Verify workflow and race condition probes are invoked with valid arguments and recipes."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        (root / "app.py").write_text(
+            "@app.post('/api/v1/orders/checkout')\n"
+            "def checkout(): pass\n"
+            "@app.post('/api/v1/coupons/apply')\n"
+            "def apply(): pass\n"
+        )
+        out_dir = root / "out"
+
+        mock_wf_result = ProbeResult(
+            flaw_type="WORKFLOW_BYPASS",
+            endpoint="/api/v1/orders/checkout",
+            vulnerable=True,
+            confidence=0.95,
+            details="Checkout succeeded without prior payment step",
+        )
+        mock_race_result = ProbeResult(
+            flaw_type="RACE_CONDITION",
+            endpoint="/api/v1/coupons/apply",
+            vulnerable=True,
+            confidence=0.9,
+            details="Coupon applied multiple times concurrently",
+        )
+
+        with (
+            patch("halo.cli.main.WorkflowProbe.execute", return_value=mock_wf_result) as mock_wf,
+            patch(
+                "halo.cli.main.RaceConditionProbe.execute", return_value=mock_race_result
+            ) as mock_race,
+            patch(
+                "halo.intent.pruner.CandidatePruner.prune_candidates",
+                return_value=[
+                    SuspectCandidate(
+                        route=RouteNode(
+                            id="r_wf",
+                            method="POST",
+                            path="/api/v1/orders/checkout",
+                            file_path="app.py",
+                        ),
+                        candidate_flaws=["WORKFLOW"],
+                        reasoning="Step skipping",
+                    ),
+                    SuspectCandidate(
+                        route=RouteNode(
+                            id="r_race",
+                            method="POST",
+                            path="/api/v1/coupons/apply",
+                            file_path="app.py",
+                        ),
+                        candidate_flaws=["RACE"],
+                        reasoning="Concurrency state multiplication",
+                    ),
+                ],
+            ),
+        ):
+            res = runner.invoke(
+                app,
+                [
+                    "scan",
+                    "--repo",
+                    str(root),
+                    "--url",
+                    "http://localhost:8000",
+                    "--out",
+                    str(out_dir),
+                    "--token-budget",
+                    "100000",
+                ],
+            )
+            assert res.exit_code == 0
+            assert mock_wf.called
+            assert mock_race.called
+
+            # Check that workflow steps passed were valid WorkflowStep instances
+            wf_kwargs = mock_wf.call_args[1]
+            assert "workflow_steps" in wf_kwargs
+            assert len(wf_kwargs["workflow_steps"]) >= 1
+            assert wf_kwargs["workflow_steps"][0].name == "action_step"
+
+            # Check reports and patches generated
+            assert (out_dir / "halo_report.json").exists()
+            assert len(list(out_dir.glob("patch_*.md"))) == 2
+            assert len(list(out_dir.glob("repro_*.py"))) == 2

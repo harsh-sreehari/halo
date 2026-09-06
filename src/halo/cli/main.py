@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 import time
-from typing import Any
+from pathlib import Path
 
 import httpx
-from rich.console import Console
 import typer
+from rich.console import Console
 
 from halo.cli.ui import (
     print_banner,
@@ -24,7 +23,7 @@ from halo.cli.ui import (
     render_findings_table,
     render_routes_table,
 )
-from halo.dast.probes.base import BaseProbe, ProbeResult
+from halo.dast.probes.base import ProbeResult
 from halo.dast.probes.bfla import BFLAProbe
 from halo.dast.probes.bola import BOLAProbe
 from halo.dast.probes.race import RaceConditionProbe
@@ -32,21 +31,22 @@ from halo.dast.probes.workflow import WorkflowProbe, WorkflowStep
 from halo.dast.sandbox import SandboxManager
 from halo.dast.vault import SessionVault
 from halo.intent.extractor import IntentExtractor
-from halo.intent.hypothesis import HypothesisGenerator
+from halo.intent.hypothesis import HypothesisGenerator, HypothesisResult
 from halo.intent.pruner import CandidatePruner, SuspectCandidate
+from halo.llm.governor import TokenGovernor
+from halo.llm.provider import get_llm_provider
 from halo.static.export import export_ckg_to_cytoscape_file
 from halo.static.graph import (
     CodeKnowledgeGraph,
     EdgeType,
     HandlerNode,
     MiddlewareNode,
-    NodeType,
     RouteNode,
     SinkNode,
 )
 from halo.static.parser import CodeParser, HandlerDefinition, RouteDefinition
 from halo.validation.cvss import CVSSCalculator
-from halo.validation.models import FindingData, FindingRecord
+from halo.validation.models import FindingRecord
 from halo.validation.patcher import RemediationPatcher
 from halo.validation.poc_builder import PoCBuilder
 from halo.validation.report import ReportGenerator
@@ -128,7 +128,7 @@ def parse_file_routes_and_handlers(
         routes = parser_inst.extract_routes(str(file_path), code=content)
         handlers = parser_inst.extract_handlers(str(file_path), code=content)
         return routes, handlers
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.debug("Failed to parse file %s: %s", file_path, exc)
         return [], []
 
@@ -180,7 +180,7 @@ def build_ckg_from_repo(
                 file_path=str(file_path),
                 line_number=r.line_number,
             )
-            setattr(r_node, "handler_name", r.handler_name)
+            r_node.handler_name = r.handler_name
             ckg.add_node(r_node)
             all_routes.append(r_node)
 
@@ -233,6 +233,8 @@ def _execute_dynamic_probes(
     target_url: str,
     vault: SessionVault,
     client: httpx.Client,
+    hypotheses: list[HypothesisResult] | None = None,
+    safe_mode: bool = True,
 ) -> list[FindingRecord]:
     """Execute dynamic probes against suspect candidates and return verified findings."""
     verified_findings: list[FindingRecord] = []
@@ -240,22 +242,39 @@ def _execute_dynamic_probes(
 
     calc = CVSSCalculator()
 
+    # Index hypotheses by candidate route ID, candidate ID, and flaw class
+    hypo_map: dict[tuple[str, str], HypothesisResult] = {}
+    if hypotheses:
+        for h in hypotheses:
+            hypo_map[(h.route_id, h.flaw_class.upper())] = h
+            hypo_map[(h.candidate_id, h.flaw_class.upper())] = h
+            hypo_map[(h.route_id, "*")] = h
+
     for cand in suspects:
         flaws = cand.candidate_flaws or ["BOLA"]
+        cand_route_id = cand.route.id if cand.route else ""
         for flaw in flaws:
             norm_flaw = flaw.upper()
             probe_result: ProbeResult | None = None
             endpoint_path = cand.route.path if cand.route else "/api"
             method_str = cand.route.method if cand.route else "GET"
 
+            # Retrieve hypothesis recipe if available
+            hypo = hypo_map.get((cand_route_id, norm_flaw)) or hypo_map.get((cand_route_id, "*"))
+            recipe = hypo.probing_recipe if hypo else None
+
             try:
                 if "BOLA" in norm_flaw or "IDOR" in norm_flaw:
                     probe = BOLAProbe()
+                    create_ep = None
+                    if recipe and recipe.extra_params.get("create_endpoint"):
+                        create_ep = recipe.extra_params["create_endpoint"]
                     probe_result = probe.execute(
                         client=client,
                         target_url=target_url,
                         vault=vault,
-                        create_endpoint=endpoint_path,
+                        recipe=recipe,
+                        create_endpoint=create_ep,
                         read_endpoint_template=endpoint_path,
                     )
                 elif "BFLA" in norm_flaw:
@@ -264,6 +283,7 @@ def _execute_dynamic_probes(
                         client=client,
                         target_url=target_url,
                         vault=vault,
+                        recipe=recipe,
                         endpoint=endpoint_path,
                         method=method_str,
                     )
@@ -273,19 +293,38 @@ def _execute_dynamic_probes(
                         client=client,
                         target_url=target_url,
                         vault=vault,
+                        recipe=recipe,
                         endpoint=endpoint_path,
                         method=method_str,
                     )
                 elif "WORKFLOW" in norm_flaw:
                     probe = WorkflowProbe()
+                    wf_steps = [
+                        WorkflowStep(name="action_step", endpoint=endpoint_path, method=method_str)
+                    ]
+                    if recipe and recipe.extra_params.get("workflow_steps"):
+                        wf_steps = recipe.extra_params["workflow_steps"]
                     probe_result = probe.execute(
                         client=client,
                         target_url=target_url,
                         vault=vault,
-                        steps=[WorkflowStep(endpoint=endpoint_path, method=method_str)],
+                        recipe=recipe,
+                        workflow_steps=wf_steps,
                     )
-            except Exception as exc:
-                logger.debug("Probe execution error for %s on %s: %s", norm_flaw, endpoint_path, exc)
+                elif "MASS" in norm_flaw:
+                    probe = BOLAProbe()
+                    probe_result = probe.execute(
+                        client=client,
+                        target_url=target_url,
+                        vault=vault,
+                        recipe=recipe,
+                        read_endpoint_template=endpoint_path,
+                        test_write=True,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Probe execution error for %s on %s: %s", norm_flaw, endpoint_path, exc
+                )
 
             if probe_result and probe_result.vulnerable:
                 finding_counter += 1
@@ -313,7 +352,8 @@ def _execute_dynamic_probes(
                     file_path=file_path,
                     line_start=line_start,
                     line_end=line_start,
-                    details=probe_result.details or f"Verified {probe_result.flaw_type} vulnerability.",
+                    details=probe_result.details
+                    or f"Verified {probe_result.flaw_type} vulnerability.",
                 )
                 finding_rec.cvss_score = cvss_score
                 finding_rec.cvss_severity = cvss_sev
@@ -326,10 +366,20 @@ def _execute_dynamic_probes(
 @app.command()
 def scan(
     repo: str = typer.Option(..., "--repo", "-r", help="Path to repository to scan"),
-    url: str | None = typer.Option(None, "--url", "-u", help="Live target URL (e.g. http://localhost:3000)"),
-    docker: bool = typer.Option(False, "--docker", "-d", help="Automatically manage Docker container lifecycle"),
-    safe_mode: bool = typer.Option(True, "--safe-mode/--force-destructive", help="Enforce read-only mutations on foreign entities"),
-    output_dir: str = typer.Option(".", "--output-dir", "-o", help="Output directory for reports and PoCs"),
+    url: str | None = typer.Option(
+        None, "--url", "-u", help="Live target URL (e.g. http://localhost:3000)"
+    ),
+    docker: bool = typer.Option(
+        False, "--docker", "-d", help="Automatically manage Docker container lifecycle"
+    ),
+    safe_mode: bool = typer.Option(
+        True,
+        "--safe-mode/--force-destructive",
+        help="Enforce read-only mutations on foreign entities",
+    ),
+    output_dir: str = typer.Option(
+        ".", "--out", "--output-dir", "-o", help="Output directory for reports and PoCs"
+    ),
     token_budget: int = typer.Option(150000, "--token-budget", help="LLM token budget limit"),
 ) -> None:
     """Run full end-to-end hybrid security audit (SAST + Intent + DAST + PoC Verification)."""
@@ -345,14 +395,18 @@ def scan(
     # -------------------------------------------------------------------------
     # Stage 1: SAST - Route & Handler Discovery and CKG Construction
     # -------------------------------------------------------------------------
-    console.print("\n[bold cyan]Stage 1: Discovering Routes & Building Code Knowledge Graph...[/bold cyan]")
-    ckg, routes, handlers = build_ckg_from_repo(repo)
+    console.print(
+        "\n[bold cyan]Stage 1: Discovering Routes & Building Code Knowledge Graph...[/bold cyan]"
+    )
+    ckg, routes, _ = build_ckg_from_repo(repo)
     render_routes_table(routes, console=console)
 
     # -------------------------------------------------------------------------
     # Stage 2: Intent Ingestion, Pruning & Hypothesis Generation
     # -------------------------------------------------------------------------
-    console.print("\n[bold yellow]Stage 2: Mining Business Policies & Pruning Candidates...[/bold yellow]")
+    console.print(
+        "\n[bold yellow]Stage 2: Mining Business Policies & Pruning Candidates...[/bold yellow]"
+    )
     intent_extractor = IntentExtractor()
     policies = intent_extractor.extract_policies(repo, ckg=ckg)
 
@@ -360,7 +414,9 @@ def scan(
     suspects = pruner.prune_candidates(ckg, policies=policies)
     render_candidates_table(suspects, console=console)
 
-    hypothesis_gen = HypothesisGenerator()
+    governor = TokenGovernor(max_budget=token_budget)
+    llm_provider = get_llm_provider("mock", governor=governor)
+    hypothesis_gen = HypothesisGenerator(llm_provider=llm_provider)
     hypotheses = hypothesis_gen.generate_hypotheses(suspects, ckg=ckg)
     console.print(f"[dim]Generated {len(hypotheses)} probing hypotheses.[/dim]")
 
@@ -378,7 +434,7 @@ def scan(
             try:
                 sandbox.boot_sandbox(repo)
                 target_url = sandbox.container_url or f"http://localhost:{sandbox.default_port}"
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 console.print(f"[bold yellow]Warning:[/bold yellow] Sandbox boot failed: {e}")
                 target_url = url or "http://localhost:8000"
 
@@ -388,7 +444,7 @@ def scan(
         vault = SessionVault()
         try:
             vault.provision_personas(target_url, repo_path=repo)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.debug("Identity provisioning exception: %s", e)
 
         with httpx.Client(base_url=target_url, timeout=10.0) as client:
@@ -398,6 +454,8 @@ def scan(
                     target_url=target_url,
                     vault=vault,
                     client=client,
+                    hypotheses=hypotheses,
+                    safe_mode=safe_mode,
                 )
             finally:
                 if sandbox:
@@ -406,7 +464,9 @@ def scan(
     # -------------------------------------------------------------------------
     # Stage 4: PoC Builder, Remediation & Multi-format Reporting
     # -------------------------------------------------------------------------
-    console.print("\n[bold magenta]Stage 4: Generating PoCs, Remediations & Reports...[/bold magenta]")
+    console.print(
+        "\n[bold magenta]Stage 4: Generating PoCs, Remediations & Reports...[/bold magenta]"
+    )
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
@@ -424,13 +484,16 @@ def scan(
         if finding.file_path and Path(finding.file_path).is_file():
             try:
                 orig_code = Path(finding.file_path).read_text(encoding="utf-8", errors="replace")
-            except Exception:
+            except OSError:
                 pass
-        patcher.generate_role_aware_patch(
+        patch_code = patcher.generate_role_aware_patch(
             finding=finding,
             handler_node=None,
             original_code=orig_code,
         )
+        finding.remediation_patch = patch_code
+        patch_filename = f"patch_{finding.id.lower().replace('-', '_')}.md"
+        (out_path / patch_filename).write_text(patch_code, encoding="utf-8")
 
     # Multi-format report exports
     report_json_path = out_path / "halo_report.json"
@@ -470,7 +533,7 @@ def sast(
     console.print(f"[bold blue]Running Static Extraction on:[/bold blue] {repo}")
 
     # Discover and build CKG
-    ckg, routes, handlers = build_ckg_from_repo(repo)
+    ckg, routes, _ = build_ckg_from_repo(repo)
     render_routes_table(routes, console=console)
 
     # Ingest documentation and policies
@@ -500,14 +563,24 @@ def sast(
 @app.command()
 def dast(
     url: str = typer.Option(..., "--url", "-u", help="Target URL"),
-    repo: str | None = typer.Option(None, "--repo", "-r", help="Optional path to repo for CKG-guided probing"),
-    safe_mode: bool = typer.Option(True, "--safe-mode/--force-destructive", help="Enforce read-only mutations on foreign entities"),
-    output_dir: str = typer.Option(".", "--output-dir", "-o", help="Output directory for reports and PoCs"),
+    repo: str | None = typer.Option(
+        None, "--repo", "-r", help="Optional path to repo for CKG-guided probing"
+    ),
+    safe_mode: bool = typer.Option(
+        True,
+        "--safe-mode/--force-destructive",
+        help="Enforce read-only mutations on foreign entities",
+    ),
+    output_dir: str = typer.Option(
+        ".", "--out", "--output-dir", "-o", help="Output directory for reports and PoCs"
+    ),
 ) -> None:
     """Run autonomous DAST active verification against a live target."""
     start_time = time.time()
     print_banner(console)
-    console.print(f"[bold yellow]Starting Autonomous DAST on:[/bold yellow] {url}")
+    console.print(
+        f"[bold yellow]Starting Autonomous DAST on:[/bold yellow] {url} (Safe Mode: {safe_mode})"
+    )
 
     suspects: list[SuspectCandidate] = []
     if repo:
@@ -543,7 +616,7 @@ def dast(
     vault = SessionVault()
     try:
         vault.provision_personas(url, repo_path=repo)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.debug("Identity provisioning exception: %s", exc)
 
     verified_findings: list[FindingRecord] = []
@@ -553,16 +626,27 @@ def dast(
             target_url=url,
             vault=vault,
             client=client,
+            safe_mode=safe_mode,
         )
 
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
     poc_builder = PoCBuilder()
+    patcher = RemediationPatcher()
     for finding in verified_findings:
         poc_code = poc_builder.generate_pep723_script(finding)
         poc_filename = f"repro_{finding.id.lower().replace('-', '_')}.py"
         (out_path / poc_filename).write_text(poc_code, encoding="utf-8")
+
+        patch_code = patcher.generate_role_aware_patch(
+            finding=finding,
+            handler_node=None,
+            original_code="",
+        )
+        finding.remediation_patch = patch_code
+        patch_filename = f"patch_{finding.id.lower().replace('-', '_')}.md"
+        (out_path / patch_filename).write_text(patch_code, encoding="utf-8")
 
     report_json_path = out_path / "halo_report.json"
     report_sarif_path = out_path / "halo_report.sarif"

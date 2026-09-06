@@ -178,7 +178,9 @@ def render_findings_table(
     table.add_column("Location", style="blue")
 
     if not findings:
-        table.add_row("-", "[green]CLEAN[/green]", "None", "0.0", "-", "No vulnerabilities detected")
+        table.add_row(
+            "-", "[green]CLEAN[/green]", "None", "0.0", "-", "No vulnerabilities detected"
+        )
         con.print(table)
         return table
 
@@ -194,7 +196,9 @@ def render_findings_table(
             score = getattr(f, "cvss_score", None)
             if score is None:
                 is_write = (f.method or "GET").upper() in {"POST", "PUT", "PATCH", "DELETE"}
-                calc_score, _, _ = calc.calculate_for_finding(flaw_type=flaw_type, is_write=is_write)
+                calc_score, _, _ = calc.calculate_for_finding(
+                    flaw_type=flaw_type, is_write=is_write
+                )
                 score = calc_score
         elif isinstance(f, dict):
             f_id = str(f.get("id", "HALO-FINDING"))
@@ -212,7 +216,9 @@ def render_findings_table(
             score = f.get("cvss_score")
             if score is None:
                 is_write = method in {"POST", "PUT", "PATCH", "DELETE"}
-                calc_score, _, _ = calc.calculate_for_finding(flaw_type=flaw_type, is_write=is_write)
+                calc_score, _, _ = calc.calculate_for_finding(
+                    flaw_type=flaw_type, is_write=is_write
+                )
                 score = calc_score
         else:
             f_id = str(getattr(f, "id", "HALO-FINDING"))
