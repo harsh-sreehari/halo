@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from enum import Enum
 from pathlib import Path
@@ -11,6 +12,8 @@ from typing import Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
+
+from halo.dast.csrf import CSRFHarvester
 
 logger = logging.getLogger(__name__)
 
@@ -260,12 +263,19 @@ class SessionVault:
         # Check / provision Admin persona if unauthenticated
         admin_persona = self.personas[PersonaType.ADMIN]
         if not admin_persona.token:
-            admin_candidates = [
-                ("admin@juice-sh.op", "admin123"),
+            env_admin = os.getenv("HALO_ADMIN_CREDS") or os.getenv("HALO_AUTH_CREDS")
+            admin_candidates = []
+            if env_admin and ":" in env_admin:
+                u, p = env_admin.split(":", 1)
+                admin_candidates.append((u.strip(), p.strip()))
+            admin_candidates.extend([
+                ("admin", "admin"),
+                ("admin", "admin123"),
                 ("admin@example.com", "admin123"),
                 ("admin@example.com", "Admin123!"),
+                ("administrator", "administrator"),
                 (admin_persona.email, admin_persona.password),
-            ]
+            ])
             for email_cand, pass_cand in admin_candidates:
                 for log_ep in login_endpoints:
                     try:
@@ -405,6 +415,18 @@ class SessionVault:
         if self.request_counts[ptype] % 10 == 0:
             return self.send_heartbeat(ptype, target_url=target_url, client=client)
         return True
+
+    def record_response(self, persona: PersonaType | str, response: httpx.Response) -> None:
+        """Record response cookies, auth headers, and harvest anti-CSRF tokens."""
+        ptype = PersonaType.from_str(persona)
+        harvester = CSRFHarvester()
+        csrf_token = harvester.extract_token(response)
+        p = self.personas[ptype]
+        for k, v in response.cookies.items():
+            p.cookies[k] = v
+        if csrf_token:
+            p.headers["X-XSRF-TOKEN"] = csrf_token
+            p.headers["X-CSRF-TOKEN"] = csrf_token
 
     def send_heartbeat(
         self,

@@ -312,6 +312,7 @@ class BOLAProbe(BaseProbe):
         )
         if vault:
             vault.record_request(attacker_type, client=http_client, target_url=target_url)
+            vault.record_response(attacker_type, attack_resp)
         resp_evidence.append(
             self.record_response_evidence(attack_resp, actor=attacker_type.value, step="unauthorized_read")
         )
@@ -326,6 +327,28 @@ class BOLAProbe(BaseProbe):
         })
 
         if attack_resp.status_code == expected_vuln_status or (200 <= attack_resp.status_code < 300):
+            try:
+                victim_json = last_sync_resp.json() if last_sync_resp else {}
+                attacker_json = attack_resp.json()
+                if isinstance(victim_json, dict) and isinstance(attacker_json, (dict, list)):
+                    from halo.dast.oracles.semantic import SemanticDifferOracle
+
+                    differ = SemanticDifferOracle()
+                    diff_res = differ.evaluate_ambiguous_response(victim_json, attacker_json)
+                    if not diff_res.is_vulnerable:
+                        return ProbeResult(
+                            flaw_type="BOLA_IDOR",
+                            endpoint=read_endpoint_template or resolved_read_endpoint,
+                            vulnerable=False,
+                            confidence=0.0,
+                            request_evidence=req_evidence,
+                            response_evidence=resp_evidence,
+                            reproduction_steps=reproduction_steps,
+                            details=f"Semantic differ verified response contains no unauthorized victim entity data: {diff_res.reasoning}",
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Semantic differ check skipped: %s", exc)
+
             observed_side_effects.append(
                 f"Unauthorized read of User_B resource '{resource_id}' by User_A at {resolved_read_endpoint} (status {attack_resp.status_code})"
             )

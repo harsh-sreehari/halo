@@ -32,7 +32,11 @@ from halo.dast.probes.workflow import WorkflowProbe, WorkflowStep
 from halo.dast.sandbox import SandboxManager
 from halo.dast.vault import SessionVault
 from halo.intent.extractor import IntentExtractor
-from halo.intent.hypothesis import HypothesisGenerator, HypothesisResult
+from halo.intent.hypothesis import (
+    FLAW_CLASS_NORMALIZATION,
+    HypothesisGenerator,
+    HypothesisResult,
+)
 from halo.intent.pruner import CandidatePruner, SuspectCandidate
 from halo.llm.governor import TokenGovernor
 from halo.llm.provider import get_llm_provider
@@ -255,26 +259,72 @@ def _execute_dynamic_probes(
     finding_counter = 0
 
     calc = CVSSCalculator()
+    sandbox_mgr = SandboxManager(safe_mode=safe_mode)
+
+    def _canon(name: str) -> str:
+        clean = name.strip().upper().replace("-", "_")
+        return FLAW_CLASS_NORMALIZATION.get(clean, clean)
 
     # Index hypotheses by candidate route ID, candidate ID, and flaw class
     hypo_map: dict[tuple[str, str], HypothesisResult] = {}
     if hypotheses:
         for h in hypotheses:
-            hypo_map[(h.route_id, h.flaw_class.upper())] = h
-            hypo_map[(h.candidate_id, h.flaw_class.upper())] = h
+            c_cls = _canon(h.flaw_class)
+            hypo_map[(h.route_id, c_cls)] = h
+            if h.candidate_id:
+                hypo_map[(h.candidate_id, c_cls)] = h
             hypo_map[(h.route_id, "*")] = h
 
     for cand in suspects:
-        flaws = cand.candidate_flaws or ["BOLA"]
         cand_route_id = cand.route.id if cand.route else ""
+        cand_id = getattr(cand, "candidate_id", getattr(cand, "id", ""))
+        flaw_set: set[str] = set()
+        merged_flaws: list[str] = []
+        for f in cand.candidate_flaws or []:
+            cf = _canon(f)
+            if cf not in flaw_set:
+                flaw_set.add(cf)
+                merged_flaws.append(cf)
+
+        if hypotheses:
+            for (r_id, f_cls), h in hypo_map.items():
+                if f_cls == "*":
+                    continue
+                if r_id == cand_route_id or (cand_id and r_id == cand_id):
+                    cf = _canon(h.flaw_class)
+                    if cf not in flaw_set:
+                        flaw_set.add(cf)
+                        merged_flaws.append(cf)
+        flaws = merged_flaws or ["BOLA_IDOR"]
+
         for flaw in flaws:
             norm_flaw = flaw.upper()
             probe_result: ProbeResult | None = None
             endpoint_path = cand.route.path if cand.route else "/api"
             method_str = cand.route.method if cand.route else "GET"
 
-            # Retrieve hypothesis recipe if available
-            hypo = hypo_map.get((cand_route_id, norm_flaw)) or hypo_map.get((cand_route_id, "*"))
+            # Enforce safe mode guardrails before attempting mutations
+            is_mutation = method_str.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+            allowed, safe_reason = sandbox_mgr.check_safe_mode_guardrails(
+                target_url=target_url,
+                method=method_str,
+                path=endpoint_path,
+                identity="halo_user_a",
+            )
+            if not allowed:
+                logger.warning(
+                    "Safe mode guardrail: probe on %s %s blocked (%s)",
+                    method_str,
+                    endpoint_path,
+                    safe_reason,
+                )
+                continue
+
+            hypo = (
+                hypo_map.get((cand_route_id, norm_flaw))
+                or (hypo_map.get((cand_id, norm_flaw)) if cand_id else None)
+                or hypo_map.get((cand_route_id, "*"))
+            )
             recipe = hypo.probing_recipe if hypo else None
 
             try:

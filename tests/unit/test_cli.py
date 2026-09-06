@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from rich.console import Console
 from rich.panel import Panel
@@ -534,3 +534,33 @@ def test_cli_scan_with_llm_provider_and_verify_pocs(tmp_path):
     )
     assert res.exit_code == 0
     assert (out_dir / "halo_report.json").exists()
+
+
+def test_dynamic_probes_incorporates_llm_hypothesis_flaws():
+    """Verify _execute_dynamic_probes executes probe for LLM-hypothesized flaw even if not in candidate_flaws."""
+    from halo.cli.main import _execute_dynamic_probes
+    from halo.dast.vault import SessionVault
+    from halo.intent.hypothesis import HypothesisResult, ProbingRecipe
+    from halo.intent.pruner import SuspectCandidate
+    from halo.static.graph import RouteNode
+
+    route = RouteNode(id="r1", method="GET", path="/admin/data")
+    cand = SuspectCandidate(candidate_id="c1", route=route, candidate_flaws=[])
+    hypo = HypothesisResult(
+        route_id="r1",
+        candidate_id="c1",
+        flaw_class="BFLA",
+        confidence=0.9,
+        reasoning="Admin path",
+        probing_recipe=ProbingRecipe(strategy="role_escalation"),
+    )
+    with patch("halo.cli.main.BFLAProbe.execute") as mock_bfla:
+        mock_bfla.return_value = None
+        _execute_dynamic_probes(
+            suspects=[cand],
+            target_url="http://test",
+            vault=SessionVault(),
+            client=MagicMock(),
+            hypotheses=[hypo],
+        )
+        assert mock_bfla.called, "Probe must be invoked for LLM hypothesized flaw"

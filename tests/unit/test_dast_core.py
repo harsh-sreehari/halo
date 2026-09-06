@@ -397,3 +397,33 @@ def test_csrf_harvester_plain_dict_case_insensitivity():
     assert harvester.extract_from_headers(headers_list) == "list_csrf_val"
 
 
+def test_vault_has_no_target_specific_credentials():
+    import inspect
+    from halo.dast import vault as vault_module
+    src = inspect.getsource(vault_module)
+    assert "juice-sh.op" not in src
+    assert "admin@juice-sh.op" not in src
+
+
+def test_safe_mode_blocks_destructive_mutation_on_remote_target():
+    mgr = SandboxManager(safe_mode=True)
+    allowed, reason = mgr.check_safe_mode_guardrails(
+        target_url="https://api.example.com",
+        method="DELETE",
+        path="/api/Users/99",
+        identity="halo_user_a",
+        resource_owner="victim_user",
+    )
+    assert not allowed
+    assert "blocked" in reason.lower()
+
+
+def test_vault_records_csrf_token_from_response():
+    vault = SessionVault()
+    resp = httpx.Response(200, headers={"Set-Cookie": "XSRF-TOKEN=csrf_secret_123; Path=/"})
+    vault.record_response(PersonaType.USER_A, resp)
+    headers = vault.get_headers(PersonaType.USER_A)
+    assert "X-XSRF-TOKEN" in headers or "X-CSRF-TOKEN" in headers or "xsrf-token" in [k.lower() for k in headers]
+
+
+
