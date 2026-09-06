@@ -591,6 +591,7 @@ def scan(
             finding=finding,
             handler_node=None,
             original_code=orig_code,
+            llm_provider=llm_provider,
         )
         finding.remediation_patch = patch_code
         patch_filename = f"patch_{finding.id.lower().replace('-', '_')}.md"

@@ -523,3 +523,52 @@ def test_module_level_verify_and_repair():
     )
     assert success is True
     assert script == valid_script
+
+
+def test_poc_builder_uses_real_tokens_and_resolved_ids():
+    builder = PoCBuilder()
+    finding = FindingRecord(
+        id="HALO-BOLA-01",
+        flaw_type="BOLA_IDOR",
+        endpoint="/api/invoices/:id",
+        method="GET",
+        severity="HIGH",
+        confidence=0.9,
+        target_url="http://target",
+        reproduction_steps=[
+            {"token": "real_token_123", "resolved_id": "42", "path": "/api/invoices/42"}
+        ],
+    )
+    script = builder.build_standalone_script(finding)
+    assert "real_token_123" in script
+    assert "/api/invoices/42" in script
+    assert "halo_token_user_a" not in script
+
+
+def test_poc_repair_loop_init_with_llm_provider_and_repair_and_verify():
+    mock_llm = MockLLMProvider()
+    loop = PoCRepairLoop(llm_provider=mock_llm, runner=lambda s: (0, "ok", ""))
+    success, res = loop.repair_and_verify(
+        script_content="assert True",
+        target_url="http://test",
+    )
+    assert success is True
+    assert res == "assert True"
+
+
+def test_poc_repair_loop_deterministic_repair_without_llm():
+    def mock_runner(s: str) -> tuple[int, str, str]:
+        if "in (200, 201, 204, 201)" in s or "== 201" in s:
+            return 0, "pass", ""
+        return 1, "", "AssertionError: Expected 200, got 201"
+
+    loop = PoCRepairLoop(runner=mock_runner)
+    success, res = loop.verify_and_repair(
+        script_content="assert attack.status_code == 200",
+        target_url="http://test",
+        llm_provider=None,
+        max_retries=1,
+    )
+    assert success is True
+    assert "201" in res
+

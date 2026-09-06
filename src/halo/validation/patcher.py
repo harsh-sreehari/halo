@@ -244,12 +244,22 @@ Requirements:
                     f"}}\n"
                     f"{orig}"
                 )
-            return (
-                f"# Validate workflow state machine transition\n"
-                f"if not entity.is_valid_transition():\n"
-                f"    raise ValueError('Invalid state transition')\n"
-                f"{orig}"
-            )
+        if "MASS" in upper_flaw or "ASSIGNMENT" in upper_flaw:
+            if lang in ("typescript", "javascript"):
+                return (
+                    f"// Enforce strict attribute whitelist and filter sensitive keys\n"
+                    f"const allowedKeys = ['name', 'email', 'bio'];\n"
+                    f"const safePayload = Object.fromEntries(\n"
+                    f"  Object.entries(req.body).filter(([key]) => allowedKeys.includes(key))\n"
+                    f");\n"
+                    f"{orig}"
+                )
+            if lang == "python":
+                return (
+                    f"# Filter sensitive attributes from payload\n"
+                    f"safe_data = {{k: v for k, v in payload.items() if k not in ('role', 'is_admin')}}\n"
+                    f"{orig}"
+                )
 
         return f"{orig}\n// Verify actor permissions and tenant boundary before proceeding"
 

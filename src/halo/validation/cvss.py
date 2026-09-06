@@ -116,7 +116,9 @@ class CVSSCalculator:
                 flaw_type=kwargs["flaw_type"],
                 requires_auth=kwargs.get("requires_auth", privileges_required != "N"),
                 scope_changed=kwargs.get("scope_changed", scope == "C"),
-                is_write=kwargs.get("is_write", integrity == "H"),
+                is_write=kwargs.get(
+                    "is_write", (integrity == "H") if "integrity" in kwargs else None
+                ),
             )
 
         av_str = str(attack_vector).strip().upper()
@@ -189,13 +191,13 @@ class CVSSCalculator:
         flaw_type: str,
         requires_auth: bool = True,
         scope_changed: bool = False,
-        is_write: bool = False,
+        is_write: bool | None = None,
     ) -> tuple[float, str, str]:
         """Map business logic flaw types to realistic CVSS v3.1 metrics and compute score.
 
         Mappings:
         - BOLA_IDOR: AV:N, AC:L, PR:L (or N if unauth), UI:N, S:U (or C), C:H, I:H if write else N, A:N
-        - BFLA: AV:N, AC:L, PR:L (or N if unauth), UI:N, S:U (or C), C:H, I:H, A:N
+        - BFLA: AV:N, AC:L, PR:L (or N if unauth), UI:N, S:U (or C), C:H, I:H if write else N, A:N
         - RACE_CONDITION: AV:N, AC:H, PR:L (or N if unauth), UI:N, S:U (or C), C:N, I:H, A:N
         - WORKFLOW_BYPASS: AV:N, AC:L, PR:L (or N if unauth), UI:N, S:U (or C), C:N, I:H, A:N
         - MASS_ASSIGNMENT: AV:N, AC:L, PR:L (or N if unauth), UI:N, S:U (or C), C:L, I:H, A:N
@@ -205,15 +207,19 @@ class CVSSCalculator:
         pr = "L" if requires_auth else "N"
         s = "C" if scope_changed else "U"
 
+        is_write_effective = (
+            (True if "BFLA" in norm_type else False) if is_write is None else is_write
+        )
+
         if "BOLA" in norm_type or "IDOR" in norm_type:
             av, ac, ui = "N", "L", "N"
             c = "H"
-            i = "H" if is_write else "N"
+            i = "H" if is_write_effective else "N"
             a = "N"
         elif "BFLA" in norm_type:
             av, ac, ui = "N", "L", "N"
             c = "H"
-            i = "H"
+            i = "H" if is_write_effective else "N"
             a = "N"
         elif "RACE" in norm_type:
             av, ac, ui = "N", "H", "N"

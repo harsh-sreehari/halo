@@ -387,3 +387,11 @@ def test_render_terminal_summary_empty():
     table = ReportGenerator.render_terminal_summary([], console=console)
     output = buf.getvalue()
     assert "No vulnerabilities" in output or "No findings" in output
+
+
+def test_cvss_readonly_bfla_integrity_is_none():
+    calc = CVSSCalculator()
+    score, sev, vec = calc.calculate_for_finding(flaw_type="BFLA", is_write=False)
+    assert "I:N" in vec, f"Expected Integrity None for read-only BFLA, got {vec}"
+    assert score < 7.0, f"Expected medium/low score for read-only BFLA, got {score}"
+

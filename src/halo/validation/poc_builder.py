@@ -79,6 +79,18 @@ if __name__ == "__main__":
 
     def generate_pep723_script(self, finding: FindingData | FindingRecord) -> str:
         """Generate PEP 723 script directly from a FindingData or FindingRecord instance."""
+        tokens: dict[str, str] = {}
+        for s in (finding.reproduction_steps or []):
+            if isinstance(s, dict):
+                tok = s.get("token") or s.get("auth_token")
+                actor_raw = str(s.get("as") or s.get("actor") or "").lower()
+                if tok:
+                    if "admin" in actor_raw:
+                        tokens.setdefault("ADMIN", tok)
+                    elif "b" in actor_raw or "victim" in actor_raw:
+                        tokens.setdefault("USER_B", tok)
+                    else:
+                        tokens.setdefault("USER_A", tok)
         return self.build_script(
             finding_id=finding.id,
             flaw_type=finding.flaw_type,
@@ -87,7 +99,12 @@ if __name__ == "__main__":
             steps=finding.reproduction_steps,
             method=finding.method,
             details=finding.details,
+            tokens=tokens or None,
         )
+
+    def build_standalone_script(self, finding: FindingData | FindingRecord) -> str:
+        """Alias for generate_pep723_script."""
+        return self.generate_pep723_script(finding)
 
     def _generate_test_body(
         self,
@@ -101,15 +118,32 @@ if __name__ == "__main__":
         lines: list[str] = []
         indent = "        "
 
+        # Check for tokens and resolved IDs in steps
+        extracted_tokens = dict(tokens or {})
+        initial_victim_id = "1"
+        for s in steps:
+            if isinstance(s, dict):
+                tok = s.get("token") or s.get("auth_token")
+                actor_raw = str(s.get("as") or s.get("actor") or "").lower()
+                if tok:
+                    if "admin" in actor_raw:
+                        extracted_tokens.setdefault("ADMIN", tok)
+                    elif "b" in actor_raw or "victim" in actor_raw:
+                        extracted_tokens.setdefault("USER_B", tok)
+                    else:
+                        extracted_tokens.setdefault("USER_A", tok)
+                if s.get("resolved_id"):
+                    initial_victim_id = str(s["resolved_id"])
+
         # Persona tokens
-        tok_a = (tokens or {}).get("USER_A", "halo_token_user_a")
-        tok_b = (tokens or {}).get("USER_B", "halo_token_user_b")
-        tok_admin = (tokens or {}).get("ADMIN", "halo_token_admin")
+        tok_a = extracted_tokens.get("USER_A", "halo_token_user_a")
+        tok_b = extracted_tokens.get("USER_B", "halo_token_user_b")
+        tok_admin = extracted_tokens.get("ADMIN", "halo_token_admin")
         lines.append(f"{indent}# 1. Setup Test Persona Headers")
         lines.append(f'{indent}headers_user_a = {{"Authorization": "Bearer {tok_a}"}}')
         lines.append(f'{indent}headers_user_b = {{"Authorization": "Bearer {tok_b}"}}')
         lines.append(f'{indent}headers_admin = {{"Authorization": "Bearer {tok_admin}"}}')
-        lines.append(f'{indent}victim_id = "1"')
+        lines.append(f'{indent}victim_id = "{initial_victim_id}"')
         lines.append("")
 
         if not steps:

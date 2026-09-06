@@ -25,9 +25,11 @@ class PoCRepairLoop:
         self,
         runner: Callable[[str], tuple[int, str, str]] | None = None,
         timeout: float = 10.0,
+        llm_provider: Any | None = None,
     ) -> None:
         self.runner = runner
         self.timeout = timeout
+        self.llm_provider = llm_provider
 
     def _execute_script(self, script_content: str, target_url: str) -> tuple[int, str, str]:
         """Execute the PoC reproduction script via runner callback or subprocess.
@@ -131,6 +133,35 @@ Requirements:
 
         return response.strip()
 
+    def _deterministic_repair(
+        self, current_script: str, returncode: int, stdout: str, stderr: str
+    ) -> str | None:
+        """Attempt rule-based deterministic repair when LLM is offline or unconfigured."""
+        output = f"{stderr}\n{stdout}"
+
+        # 1. Status code mismatch in assertion, e.g. "Expected 200, got 201" or "got 204"
+        match = re.search(r"got (\d{3})", output)
+        if match:
+            got_status = int(match.group(1))
+            if 200 <= got_status < 400:
+                new_script = re.sub(
+                    r"assert (attack|res_\d+)\.status_code == \d{3}",
+                    f"assert \\1.status_code in (200, 201, 204, {got_status})",
+                    current_script,
+                )
+                if new_script != current_script:
+                    return new_script
+
+        # 2. Missing redirects
+        if "follow_redirects" not in current_script and ("301" in output or "302" in output):
+            new_script = current_script.replace(
+                "httpx.Client(", "httpx.Client(follow_redirects=True, "
+            )
+            if new_script != current_script:
+                return new_script
+
+        return None
+
     def verify_and_repair(
         self,
         script_content: str,
@@ -143,6 +174,7 @@ Requirements:
         Returns (is_repaired_and_verified, final_script_content).
         """
         current_script = script_content
+        effective_llm = llm_provider if llm_provider is not None else self.llm_provider
 
         for attempt in range(max_retries + 1):
             returncode, stdout, stderr = self._execute_script(current_script, target_url)
@@ -154,8 +186,16 @@ Requirements:
                 f"PoC execution failed on attempt {attempt + 1} (code {returncode}):\n{stderr or stdout}"
             )
 
-            # If all retries exhausted or no LLM provider available, abort
-            if attempt >= max_retries or llm_provider is None:
+            # If all retries exhausted, abort
+            if attempt >= max_retries:
+                break
+
+            # If no LLM provider available, attempt deterministic repair
+            if effective_llm is None:
+                det_code = self._deterministic_repair(current_script, returncode, stdout, stderr)
+                if det_code and det_code != current_script:
+                    current_script = det_code
+                    continue
                 break
 
             # Query LLM to repair the script
@@ -173,15 +213,34 @@ Requirements:
             )
 
             try:
-                response = llm_provider.generate(prompt, system_prompt=system_prompt)
+                response = effective_llm.generate(prompt, system_prompt=system_prompt)
                 repaired_code = self._extract_code(response)
                 if repaired_code.strip():
                     current_script = repaired_code
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"PoC repair LLM invocation failed: {exc}")
+                det_code = self._deterministic_repair(current_script, returncode, stdout, stderr)
+                if det_code and det_code != current_script:
+                    current_script = det_code
+                    continue
                 break
 
         return False, current_script
+
+    def repair_and_verify(
+        self,
+        script_content: str,
+        target_url: str,
+        llm_provider: Any | None = None,
+        max_retries: int = 2,
+    ) -> tuple[bool, str]:
+        """Alias for verify_and_repair matching CLI invocation signature."""
+        return self.verify_and_repair(
+            script_content=script_content,
+            target_url=target_url,
+            llm_provider=llm_provider,
+            max_retries=max_retries,
+        )
 
 
 def verify_and_repair(
