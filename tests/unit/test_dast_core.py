@@ -399,6 +399,7 @@ def test_csrf_harvester_plain_dict_case_insensitivity():
 
 def test_vault_has_no_target_specific_credentials():
     import inspect
+
     from halo.dast import vault as vault_module
     src = inspect.getsource(vault_module)
     assert "juice-sh.op" not in src

@@ -3,26 +3,26 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, ClassVar
 
 
 class CVSSCalculator:
     """Computes deterministic CVSS v3.1 base score, qualitative severity, and vector string."""
 
     # Metric weight tables adhering to CVSS v3.1 specification
-    AV_WEIGHTS: dict[str, float] = {
+    AV_WEIGHTS: ClassVar[dict[str, float]] = {
         "N": 0.85,  # Network
         "A": 0.62,  # Adjacent
         "L": 0.55,  # Local
         "P": 0.20,  # Physical
     }
 
-    AC_WEIGHTS: dict[str, float] = {
+    AC_WEIGHTS: ClassVar[dict[str, float]] = {
         "L": 0.77,  # Low
         "H": 0.44,  # High
     }
 
-    PR_WEIGHTS: dict[str, dict[str, float]] = {
+    PR_WEIGHTS: ClassVar[dict[str, dict[str, float]]] = {
         "U": {  # Scope Unchanged
             "N": 0.85,  # None
             "L": 0.62,  # Low
@@ -35,12 +35,12 @@ class CVSSCalculator:
         },
     }
 
-    UI_WEIGHTS: dict[str, float] = {
+    UI_WEIGHTS: ClassVar[dict[str, float]] = {
         "N": 0.85,  # None
         "R": 0.62,  # Required
     }
 
-    CIA_WEIGHTS: dict[str, float] = {
+    CIA_WEIGHTS: ClassVar[dict[str, float]] = {
         "N": 0.00,  # None
         "L": 0.22,  # Low
         "H": 0.56,  # High
@@ -208,15 +208,10 @@ class CVSSCalculator:
         s = "C" if scope_changed else "U"
 
         is_write_effective = (
-            (True if "BFLA" in norm_type else False) if is_write is None else is_write
+            ("BFLA" in norm_type) if is_write is None else is_write
         )
 
-        if "BOLA" in norm_type or "IDOR" in norm_type:
-            av, ac, ui = "N", "L", "N"
-            c = "H"
-            i = "H" if is_write_effective else "N"
-            a = "N"
-        elif "BFLA" in norm_type:
+        if "BOLA" in norm_type or "IDOR" in norm_type or "BFLA" in norm_type:
             av, ac, ui = "N", "L", "N"
             c = "H"
             i = "H" if is_write_effective else "N"

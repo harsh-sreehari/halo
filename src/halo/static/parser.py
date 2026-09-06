@@ -287,18 +287,20 @@ class CodeParser:
                 )
             ) or r.handler_name.endswith("()")
 
-            if existing.handler_name and (is_existing_guard or r.handler_name):
-                if existing.handler_name not in combined_mw and existing.handler_name != r.handler_name:
-                    combined_mw.append(existing.handler_name)
+            if (
+                existing.handler_name
+                and (is_existing_guard or r.handler_name)
+                and existing.handler_name not in combined_mw
+                and existing.handler_name != r.handler_name
+            ):
+                combined_mw.append(existing.handler_name)
 
             for mw in r.middleware:
                 if mw not in combined_mw:
                     combined_mw.append(mw)
 
             new_handler = existing.handler_name
-            if is_existing_guard and r.handler_name and not is_r_guard:
-                new_handler = r.handler_name
-            elif not existing.handler_name and r.handler_name:
+            if is_existing_guard and r.handler_name and not is_r_guard or not existing.handler_name and r.handler_name:
                 new_handler = r.handler_name
             elif r.handler_name and is_r_guard and r.handler_name not in combined_mw:
                 combined_mw.append(r.handler_name)

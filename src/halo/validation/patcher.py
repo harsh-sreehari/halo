@@ -244,6 +244,13 @@ Requirements:
                     f"}}\n"
                     f"{orig}"
                 )
+            return (
+                f"# Validate workflow state machine transition\n"
+                f"if not entity.is_valid_transition():\n"
+                f"    raise ValueError('Invalid state transition')\n"
+                f"{orig}"
+            )
+
         if "MASS" in upper_flaw or "ASSIGNMENT" in upper_flaw:
             if lang in ("typescript", "javascript"):
                 return (

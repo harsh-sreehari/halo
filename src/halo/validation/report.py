@@ -5,8 +5,8 @@ Supports JSON, GitHub Security SARIF 2.1.0, Executive Markdown, and Rich Termina
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -100,7 +100,7 @@ class ReportGenerator:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         records = [cls._ensure_finding_model(f) for f in findings]
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
 
         findings_data: list[dict[str, Any]] = []
         for r in records:
@@ -244,7 +244,7 @@ class ReportGenerator:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         records = [cls._ensure_finding_model(f) for f in findings]
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
         # Aggregate counts by severity
         sev_counts: dict[str, int] = {
@@ -296,7 +296,7 @@ class ReportGenerator:
         finding_details: list[str] = []
 
         for r in records:
-            score, sev, vec = cls._enrich_finding_cvss(r)
+            score, _sev, vec = cls._enrich_finding_cvss(r)
             sev_badge = badge_map.get(r.severity.upper(), r.severity)
             loc = f"`{r.file_path}:{r.line_start}`" if r.file_path else "`N/A`"
             endpoint_disp = f"`{r.method} {r.endpoint}`" if r.endpoint else "`N/A`"
@@ -385,7 +385,7 @@ class ReportGenerator:
         }
 
         for r in records:
-            score, sev, _ = cls._enrich_finding_cvss(r)
+            score, _sev, _ = cls._enrich_finding_cvss(r)
             color = sev_colors.get(r.severity.upper(), "white")
             sev_formatted = f"[{color}]{r.severity.upper()}[/{color}]"
             loc = f"{r.file_path}:{r.line_start}" if r.file_path else "-"

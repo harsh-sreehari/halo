@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -367,11 +368,24 @@ def _execute_dynamic_probes(
                     )
                 elif "WORKFLOW" in norm_flaw:
                     probe = WorkflowProbe()
-                    wf_steps = [
-                        WorkflowStep(name="action_step", endpoint=endpoint_path, method=method_str)
-                    ]
+                    wf_steps = []
                     if recipe and recipe.extra_params.get("workflow_steps"):
                         wf_steps = recipe.extra_params["workflow_steps"]
+                    if not wf_steps:
+                        base_match = re.match(
+                            r"^(.*?)(?:/(?::\w+|\{\w+\}))?/(?:ship|checkout|confirm|approve|complete|pay|deliver|cancel)(?:/.*)?$",
+                            endpoint_path,
+                            re.IGNORECASE,
+                        )
+                        if base_match:
+                            wf_steps = [
+                                WorkflowStep(name="action_step", endpoint=base_match.group(1), method="POST"),
+                                WorkflowStep(name="terminal_step", endpoint=endpoint_path, method=method_str),
+                            ]
+                        else:
+                            wf_steps = [
+                                WorkflowStep(name="action_step", endpoint=endpoint_path, method=method_str)
+                            ]
                     probe_result = probe.execute(
                         client=client,
                         target_url=target_url,

@@ -25,7 +25,7 @@ def load_env_files() -> None:
                         v = v.strip().strip("'\"")
                         if k and k not in os.environ:
                             os.environ[k] = v
-            except Exception:
+            except OSError:
                 pass
 
 
