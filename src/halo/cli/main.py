@@ -272,7 +272,7 @@ def _execute_dynamic_probes(
                     create_ep = None
                     if recipe and recipe.extra_params.get("create_endpoint"):
                         create_ep = recipe.extra_params["create_endpoint"]
-                    is_mutation = method_str.upper() in {"PUT", "PATCH"}
+                    is_mutation = method_str.upper() in {"POST", "PUT", "PATCH", "DELETE"}
                     probe_result = probe.execute(
                         client=client,
                         target_url=target_url,

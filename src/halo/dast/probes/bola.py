@@ -232,16 +232,28 @@ class BOLAProbe(BaseProbe):
                 resource_id,
                 primary_param,
             )
-            mutation_body = write_payload or {"name": "halo_tampered_value"}
+            canonical_write_ep = (
+                write_endpoint_template
+                or read_endpoint_template
+                or target_test_endpoint
+                or resolved_write_endpoint
+            )
+            mutation_body = None
+            if write_method.upper() != "DELETE":
+                mutation_body = write_payload or {"name": "halo_tampered_value"}
+
             req_ev_a = self.record_request_evidence(
                 write_method, resolved_write_endpoint, attacker_headers, mutation_body, actor=attacker_type.value
             )
             req_evidence.append(req_ev_a)
+            req_kwargs: dict[str, Any] = {"headers": attacker_headers}
+            if mutation_body is not None:
+                req_kwargs["json"] = mutation_body
+
             attack_resp = http_client.request(
                 write_method,
                 resolved_write_endpoint,
-                headers=attacker_headers,
-                json=mutation_body,
+                **req_kwargs,
             )
             if vault:
                 vault.record_request(attacker_type, client=http_client, target_url=target_url)
@@ -252,7 +264,7 @@ class BOLAProbe(BaseProbe):
             is_vuln = (
                 attack_resp.status_code in (200, 201, 204)
                 or attack_resp.status_code == expected_vuln_status
-            )
+            ) and attack_resp.status_code not in (401, 403, 404)
             if is_vuln:
                 observed_side_effects.append(
                     f"State mutation confirmed: User_A successfully tampered with User_B's resource '{resource_id}' via {write_method} {resolved_write_endpoint} (status {attack_resp.status_code})"
@@ -268,7 +280,7 @@ class BOLAProbe(BaseProbe):
                 })
                 return ProbeResult(
                     flaw_type="BOLA_IDOR",
-                    endpoint=resolved_write_endpoint,
+                    endpoint=canonical_write_ep,
                     vulnerable=True,
                     confidence=0.95,
                     request_evidence=req_evidence,
@@ -280,7 +292,7 @@ class BOLAProbe(BaseProbe):
             else:
                 return ProbeResult(
                     flaw_type="BOLA_IDOR",
-                    endpoint=resolved_write_endpoint,
+                    endpoint=canonical_write_ep,
                     vulnerable=False,
                     confidence=0.0,
                     request_evidence=req_evidence,

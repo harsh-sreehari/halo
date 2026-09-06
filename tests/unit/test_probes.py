@@ -804,3 +804,36 @@ def test_race_condition_generic_promo_payload():
     assert res.vulnerable is True
     assert "DISCOUNT50" not in str(res.request_evidence)
     assert any("PROMO" in str(req) for req in res.request_evidence)
+
+
+def test_bola_probe_handles_delete_method_and_preserves_template():
+    """Verify BOLA probe handles DELETE mutation, does not flag 403 as vulnerable, and preserves template."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/Users":
+            return httpx.Response(201, json={"id": 42})
+        elif request.method == "GET" and request.url.path == "/api/Users/42":
+            return httpx.Response(200, json={"id": 42, "name": "User 42"})
+        elif request.method == "DELETE" and request.url.path == "/api/Users/42":
+            return httpx.Response(403, json={"error": "Access denied"})
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
+    vault = SessionVault()
+    vault.set_token(PersonaType.USER_A, "token_a")
+    vault.set_token(PersonaType.USER_B, "token_b")
+
+    probe = BOLAProbe()
+    result = probe.execute(
+        client=client,
+        target_url="http://test",
+        vault=vault,
+        create_endpoint="/api/Users",
+        create_payload={"name": "test"},
+        read_endpoint_template="/api/Users/:id",
+        write_endpoint_template="/api/Users/:id",
+        test_write=True,
+        write_method="DELETE",
+    )
+    assert result.endpoint == "/api/Users/:id"
+    assert result.vulnerable is False
+
