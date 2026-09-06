@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 import time
 from collections import deque
 
@@ -48,6 +50,10 @@ class TokenGovernor:
         if max_budget <= 0:
             raise ValueError(f"max_budget must be positive, got {max_budget}")
         self.max_budget = max_budget
+        if max_requests_per_minute is None:
+            env_rpm = os.getenv("HALO_MAX_RPM")
+            if env_rpm and env_rpm.isdigit():
+                max_requests_per_minute = int(env_rpm)
         self.max_requests_per_minute = max_requests_per_minute
         self.max_tokens_per_minute = max_tokens_per_minute
         self.window_seconds = window_seconds
@@ -83,6 +89,33 @@ class TokenGovernor:
             self._request_timestamps.popleft()
         while self._token_timestamps and self._token_timestamps[0][0] < cutoff:
             self._token_timestamps.popleft()
+
+    def wait_for_rate_limit(self, projected_tokens: int = 0) -> None:
+        """Wait if needed until the sliding-window rate limit allows a new request."""
+        now = time.time()
+        self._purge_window(now)
+
+        while (
+            self.max_requests_per_minute is not None
+            and len(self._request_timestamps) >= self.max_requests_per_minute
+        ):
+            sleep_duration = self._request_timestamps[0] + self.window_seconds - now + 0.05
+            if sleep_duration > 0:
+                time.sleep(sleep_duration)
+            now = time.time()
+            self._purge_window(now)
+
+        while self.max_tokens_per_minute is not None:
+            current_tokens = sum(tokens for _, tokens in self._token_timestamps)
+            if current_tokens + projected_tokens <= self.max_tokens_per_minute:
+                break
+            if not self._token_timestamps:
+                break
+            sleep_duration = self._token_timestamps[0][0] + self.window_seconds - now + 0.05
+            if sleep_duration > 0:
+                time.sleep(sleep_duration)
+            now = time.time()
+            self._purge_window(now)
 
     def check_rate_limit(self, projected_tokens: int = 0) -> None:
         """Verify if current call conforms to sliding-window rate limits.

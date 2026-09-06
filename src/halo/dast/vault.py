@@ -188,6 +188,16 @@ class SessionVault:
             "/api/signup",
             "/api/v1/signup",
             "/auth/register",
+            "/api/Users",
+            "/api/Users/",
+        ]
+
+        login_endpoints = [
+            "/login",
+            "/api/login",
+            "/api/v1/login",
+            "/rest/user/login",
+            "/auth/login",
         ]
 
         success_count = 0
@@ -204,21 +214,77 @@ class SessionVault:
                 }
                 try:
                     resp = client.post(endpoint, json=payload)
-                    if resp.status_code in (200, 201):
+                    ct = resp.headers.get("content-type", "").lower()
+                    is_json = "json" in ct
+                    if resp.status_code in (200, 201) and is_json:
                         token = self._extract_token_from_response(resp)
                         if token:
                             persona.set_token(token)
-                        # Save cookies
                         if hasattr(resp, "cookies"):
                             for k, v in resp.cookies.items():
                                 persona.cookies[k] = v
                         registered = True
                         break
+                    elif resp.status_code in (400, 409) and is_json:
+                        registered = True
+                        break
                 except httpx.HTTPError as err:
                     logger.debug("Registration probe error on %s: %s", endpoint, err)
 
+            # If registered or existing, authenticate via login endpoints if token not yet set
+            if not persona.token:
+                for log_ep in login_endpoints:
+                    try:
+                        login_payload = {
+                            "email": persona.email,
+                            "username": persona.username,
+                            "password": persona.password,
+                        }
+                        resp_log = client.post(log_ep, json=login_payload)
+                        ct_log = resp_log.headers.get("content-type", "").lower()
+                        if resp_log.status_code in (200, 201) and "json" in ct_log:
+                            token = self._extract_token_from_response(resp_log)
+                            if token:
+                                persona.set_token(token)
+                            if hasattr(resp_log, "cookies"):
+                                for k, v in resp_log.cookies.items():
+                                    persona.cookies[k] = v
+                            registered = True
+                            break
+                    except httpx.HTTPError:
+                        pass
+
             if registered:
                 success_count += 1
+
+        # Check / provision Admin persona if unauthenticated
+        admin_persona = self.personas[PersonaType.ADMIN]
+        if not admin_persona.token:
+            admin_candidates = [
+                ("admin@juice-sh.op", "admin123"),
+                ("admin@example.com", "admin123"),
+                ("admin@example.com", "Admin123!"),
+                (admin_persona.email, admin_persona.password),
+            ]
+            for email_cand, pass_cand in admin_candidates:
+                for log_ep in login_endpoints:
+                    try:
+                        resp_admin = client.post(
+                            log_ep,
+                            json={"email": email_cand, "password": pass_cand},
+                        )
+                        ct_admin = resp_admin.headers.get("content-type", "").lower()
+                        if resp_admin.status_code in (200, 201) and "json" in ct_admin:
+                            token = self._extract_token_from_response(resp_admin)
+                            if token:
+                                admin_persona.set_token(token)
+                                admin_persona.email = email_cand
+                                admin_persona.password = pass_cand
+                                break
+                    except httpx.HTTPError:
+                        pass
+                if admin_persona.token:
+                    break
 
         return success_count >= 2
 
@@ -230,11 +296,12 @@ class SessionVault:
                 for key in ("token", "access_token", "jwt", "id_token", "session_token"):
                     if key in data and isinstance(data[key], str):
                         return data[key]
-                # Check nested data object
-                if "data" in data and isinstance(data["data"], dict):
-                    for key in ("token", "access_token", "jwt"):
-                        if key in data["data"] and isinstance(data["data"][key], str):
-                            return data["data"][key]
+                # Check nested data or authentication object
+                for container_key in ("data", "authentication"):
+                    if container_key in data and isinstance(data[container_key], dict):
+                        for key in ("token", "access_token", "jwt", "id_token", "session_token"):
+                            if key in data[container_key] and isinstance(data[container_key][key], str):
+                                return data[container_key][key]
         except (json.JSONDecodeError, ValueError, KeyError):
             logger.debug("Could not parse JSON token from response")
 

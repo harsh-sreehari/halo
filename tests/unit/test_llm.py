@@ -13,6 +13,7 @@ from halo.llm.provider import (
     AnthropicProvider,
     GeminiProvider,
     MockLLMProvider,
+    NvidiaProvider,
     OllamaProvider,
     OpenAIProvider,
     get_llm_provider,
@@ -475,10 +476,57 @@ def test_get_llm_provider_factory():
         p_auto_default = get_llm_provider("auto")
         assert isinstance(p_auto_default, MockLLMProvider)
 
-    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-mock-env"}):
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-mock-env"}, clear=True):
         p_auto_openai = get_llm_provider("auto")
         assert isinstance(p_auto_openai, OpenAIProvider)
 
-    # 7. Invalid provider raises ValueError
+    # 7. Nvidia provider with key vs absent
+    with patch.dict(os.environ, {}, clear=True):
+        p_nvidia_absent = get_llm_provider("nvidia")
+        assert isinstance(p_nvidia_absent, MockLLMProvider)
+
+        p_nvidia_with_key = get_llm_provider("nvidia", api_key="nvapi-test")
+        assert isinstance(p_nvidia_with_key, NvidiaProvider)
+        assert p_nvidia_with_key.base_url == "https://integrate.api.nvidia.com/v1"
+        assert p_nvidia_with_key.model == "nvidia/nemotron-3-super-120b-a12b"
+
+    with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvapi-test-env"}, clear=True):
+        p_auto_nvidia = get_llm_provider("auto")
+        assert isinstance(p_auto_nvidia, NvidiaProvider)
+
+    # 8. Invalid provider raises ValueError
     with pytest.raises(ValueError, match="Unknown provider type"):
         get_llm_provider("unsupported_provider_type")
+
+
+def test_nvidia_provider_call():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == "https://integrate.api.nvidia.com/v1/chat/completions"
+        assert request.headers["Authorization"] == "Bearer nvapi-123"
+        body = json.loads(request.read().decode("utf-8"))
+        assert body["model"] == "nvidia/nemotron-3-super-120b-a12b"
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"analysis": "tested"}'}}],
+                "usage": {"prompt_tokens": 15, "completion_tokens": 8},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.Client(transport=transport)
+
+    provider = NvidiaProvider(api_key="nvapi-123", client=client)
+    res = provider.generate("Test prompt")
+    assert res == '{"analysis": "tested"}'
+
+
+def test_token_governor_wait_for_rate_limit():
+    gov = TokenGovernor(max_budget=10000, max_requests_per_minute=2, window_seconds=0.2)
+    t0 = time.time()
+    gov.track_usage(10, 10)
+    gov.track_usage(10, 10)
+    # Third request should trigger wait_for_rate_limit until window expires
+    gov.wait_for_rate_limit(projected_tokens=20)
+    elapsed = time.time() - t0
+    assert elapsed >= 0.15

@@ -366,6 +366,9 @@ def _execute_dynamic_probes(
                 finding_rec.cvss_severity = cvss_sev
                 finding_rec.cvss_vector = cvss_vec
                 verified_findings.append(finding_rec)
+                console.print(
+                    f"  [bold red]⚡ Verified Vulnerability:[/bold red] [{cvss_sev}] {probe_result.flaw_type} on [cyan]{method_str} {endpoint_path}[/cyan]"
+                )
 
     return verified_findings
 
@@ -391,7 +394,7 @@ def scan(
     llm_provider_name: str = typer.Option(
         os.environ.get("HALO_LLM_PROVIDER", "mock"),
         "--llm-provider",
-        help="LLM provider name (mock, openai, anthropic, gemini, ollama, auto)",
+        help="LLM provider name (mock, openai, anthropic, gemini, ollama, nvidia, auto)",
     ),
     verify_pocs: bool = typer.Option(
         False,
@@ -434,8 +437,21 @@ def scan(
     governor = TokenGovernor(max_budget=token_budget)
     llm_provider = get_llm_provider(llm_provider_name, governor=governor)
     hypothesis_gen = HypothesisGenerator(llm_provider=llm_provider)
-    hypotheses = hypothesis_gen.generate_hypotheses(suspects, ckg=ckg)
-    console.print(f"[dim]Generated {len(hypotheses)} probing hypotheses.[/dim]")
+    model_name = getattr(llm_provider, "model", llm_provider_name)
+    console.print(
+        f"[bold yellow]Reasoning with LLM ({model_name}) across {len(suspects)} suspect candidates...[/bold yellow]"
+    )
+    hypotheses = []
+    for idx, cand in enumerate(suspects, start=1):
+        r_path = cand.route.path if cand.route else "endpoint"
+        r_method = cand.route.method if cand.route else "ANY"
+        console.print(
+            f"  [dim]• [{idx}/{len(suspects)}][/dim] Analyzing [cyan]{r_method} {r_path}[/cyan]..."
+        )
+        hypo = hypothesis_gen.generate_hypothesis(candidate=cand, ckg=ckg, llm_provider=llm_provider)
+        hypotheses.append(hypo)
+
+    console.print(f"[bold green]✓ Generated {len(hypotheses)} probing hypotheses.[/bold green]")
 
     # -------------------------------------------------------------------------
     # Stage 3: DAST - Dynamic Active Verification

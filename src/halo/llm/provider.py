@@ -38,6 +38,11 @@ class LLMProvider(ABC):
                     f"Token budget exceeded: remaining {self.governor.remaining_budget()} tokens"
                 )
 
+            # Wait for rate limit window if enabled
+            self.governor.wait_for_rate_limit(
+                projected_tokens=estimate_tokens(f"{system_prompt}{prompt}")
+            )
+
             response, tokens_in, tokens_out = self._call(prompt, system_prompt)
 
             # Record consumption and cache response
@@ -425,6 +430,37 @@ class OllamaProvider(LLMProvider):
             )
 
 
+class NvidiaProvider(OpenAIProvider):
+    """NVIDIA NIM API provider adapter using OpenAI-compatible chat completions."""
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str = "https://integrate.api.nvidia.com/v1",
+        client: httpx.Client | None = None,
+        governor: TokenGovernor | None = None,
+        timeout: float = 60.0,
+        fallback_response: str = '{"status": "ok", "mock": true, "provider": "nvidia"}',
+        fallback_on_error: bool = False,
+    ) -> None:
+        key = api_key or os.getenv("NVIDIA_API_KEY")
+        selected_model = (
+            model or os.getenv("NVIDIA_MODEL") or "nvidia/nemotron-3-super-120b-a12b"
+        )
+        resolved_base_url = (os.getenv("NVIDIA_BASE_URL") or base_url).rstrip("/")
+        super().__init__(
+            api_key=key,
+            model=selected_model,
+            base_url=resolved_base_url,
+            client=client,
+            governor=governor,
+            timeout=timeout,
+            fallback_response=fallback_response,
+            fallback_on_error=fallback_on_error,
+        )
+
+
 def get_llm_provider(
     provider_type: str = "mock",
     governor: TokenGovernor | None = None,
@@ -436,6 +472,18 @@ def get_llm_provider(
 
     if p_type == "mock":
         return MockLLMProvider(governor=governor, **kwargs)
+
+    if p_type == "nvidia":
+        api_key = kwargs.get("api_key") or os.getenv("NVIDIA_API_KEY")
+        if not api_key:
+            logger.info("NVIDIA_API_KEY not found; falling back to MockLLMProvider")
+            default_resp = kwargs.pop(
+                "default_response", '{"mock": true, "provider": "nvidia"}'
+            )
+            return MockLLMProvider(governor=governor, default_response=default_resp, **kwargs)
+        return NvidiaProvider(
+            governor=governor, fallback_on_error=fallback_on_error, **kwargs
+        )
 
     if p_type == "openai":
         api_key = kwargs.get("api_key") or os.getenv("OPENAI_API_KEY")
@@ -479,6 +527,10 @@ def get_llm_provider(
         )
 
     if p_type == "auto":
+        if os.getenv("NVIDIA_API_KEY"):
+            return NvidiaProvider(
+                governor=governor, fallback_on_error=fallback_on_error, **kwargs
+            )
         if os.getenv("OPENAI_API_KEY"):
             return OpenAIProvider(
                 governor=governor, fallback_on_error=fallback_on_error, **kwargs
@@ -500,5 +552,5 @@ def get_llm_provider(
 
     raise ValueError(
         f"Unknown provider type '{provider_type}'. Supported types: "
-        "'mock', 'openai', 'anthropic', 'gemini', 'ollama', 'auto'"
+        "'mock', 'openai', 'anthropic', 'gemini', 'ollama', 'nvidia', 'auto'"
     )
