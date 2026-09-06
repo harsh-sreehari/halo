@@ -120,6 +120,7 @@ class BFLAProbe(BaseProbe):
             "step": 1,
             "actor": admin_type.value,
             "action": f"{method.upper()} {endpoint}",
+            "path": endpoint,
             "status": admin_resp.status_code,
             "description": "Admin requests privileged endpoint to verify availability baseline",
         })
@@ -174,6 +175,7 @@ class BFLAProbe(BaseProbe):
             "step": 2,
             "actor": user_type.value,
             "action": f"{method.upper()} {endpoint}",
+            "path": endpoint,
             "status": user_resp.status_code,
             "description": f"Standard user ({user_type.value}) sends identical request to privileged route",
         })
@@ -218,6 +220,7 @@ class BFLAProbe(BaseProbe):
             "step": 3,
             "actor": "UNAUTHENTICATED",
             "action": f"{method.upper()} {endpoint}",
+            "path": endpoint,
             "status": unauth_resp.status_code,
             "description": "Unauthenticated client sends identical request without credentials",
         })

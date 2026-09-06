@@ -92,8 +92,12 @@ class RaceConditionProbe(BaseProbe):
             burst_size = extra.get("concurrency_burst", extra.get("burst_size", burst_size))
             endpoint = endpoint or extra.get("endpoint", extra.get("path", ""))
             method = extra.get("method", method)
-            payload = payload if payload is not None else extra.get("payload")
             verify_endpoint = verify_endpoint or extra.get("verify_endpoint")
+
+        if payload is None:
+            ep_lower = endpoint.lower()
+            if any(k in ep_lower for k in ("coupon", "voucher", "discount", "promo", "code")):
+                payload = {"code": "DISCOUNT50", "coupon": "DISCOUNT50"}
 
         actor_type = PersonaType.from_str(actor) if isinstance(actor, (PersonaType, str)) else PersonaType.USER_A
         req_headers = dict(vault.get_headers(actor_type) if vault else {})
@@ -206,6 +210,9 @@ class RaceConditionProbe(BaseProbe):
             "step": 1,
             "actor": actor_type.value,
             "action": f"Burst {burst_size} synchronized concurrent {method} requests to {endpoint}",
+            "path": endpoint,
+            "count": min(burst_size, 10),
+            "payload": payload,
             "successful_requests": success_count,
             "total_requests": len(responses),
             "description": f"Released {burst_size} concurrent requests simultaneously via {'HTTP/2 multiplexing' if use_h2 else 'H1.1 barrier pool'}",

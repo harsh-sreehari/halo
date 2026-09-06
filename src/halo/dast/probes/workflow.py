@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -160,14 +161,16 @@ class WorkflowProbe(BaseProbe):
         # -------------------------------------------------------------------
         # 2. Permutation Strategy: Direct Out-of-Order Terminal Execution
         # -------------------------------------------------------------------
-        # Test directly calling the terminal step without ANY preceding steps
-        if len(steps) >= 2:
+        # Test directly calling the terminal step without prior workflow setup
+        if len(steps) >= 1:
             terminal_step = steps[-1]
             is_vuln, last_resp, seq_req_ev, seq_resp_ev = self._run_step_sequence(
                 http_client, [terminal_step], actor_headers, actor_type.value, target_url, vault
             )
             req_evidence.extend(seq_req_ev)
             resp_evidence.extend(seq_resp_ev)
+
+            resolved_ep = self._interpolate_template(terminal_step.endpoint, {})
 
             if is_vuln and last_resp is not None:
                 observed_side_effects.append(
@@ -176,9 +179,10 @@ class WorkflowProbe(BaseProbe):
                 reproduction_steps.append({
                     "step": 1,
                     "actor": actor_type.value,
-                    "action": f"Direct out-of-order execution of '{terminal_step.name}' at {terminal_step.endpoint}",
+                    "action": f"{terminal_step.method.upper()} {resolved_ep}",
+                    "path": resolved_ep,
                     "status": last_resp.status_code,
-                    "description": f"Directly invoked {terminal_step.method} {terminal_step.endpoint} without prior workflow initialization",
+                    "description": f"Directly invoked {terminal_step.method} {resolved_ep} without prior workflow initialization",
                 })
                 return ProbeResult(
                     flaw_type="WORKFLOW_BYPASS",
@@ -275,6 +279,9 @@ class WorkflowProbe(BaseProbe):
         result = text
         for k, v in state_vars.items():
             result = result.replace(f"{{{k}}}", str(v))
+            result = result.replace(f":{k}", str(v))
+        # Fallback replacement for any unresolved path parameters
+        result = re.sub(r"\{[a-zA-Z0-9_]+\}|:[a-zA-Z0-9_]+", "1", result)
         return result
 
     def _interpolate_payload(self, payload: Any, state_vars: dict[str, Any]) -> Any:

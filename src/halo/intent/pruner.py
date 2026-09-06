@@ -382,7 +382,11 @@ class CandidatePruner:
             for qp in sink.query_params:
                 tokens.update(re.findall(r"[a-zA-Z0-9_]+", qp.lower()))
 
-        matched_keywords = tokens.intersection(RACE_KEYWORDS)
+        matched_keywords = {
+            t
+            for t in tokens
+            if t in RACE_KEYWORDS or (t.endswith("s") and t[:-1] in RACE_KEYWORDS)
+        }
         if matched_keywords:
             kw_str = ", ".join(sorted(matched_keywords))
             return (

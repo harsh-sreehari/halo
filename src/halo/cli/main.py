@@ -26,6 +26,7 @@ from halo.cli.ui import (
 from halo.dast.probes.base import ProbeResult
 from halo.dast.probes.bfla import BFLAProbe
 from halo.dast.probes.bola import BOLAProbe
+from halo.dast.probes.mass_assignment import MassAssignmentProbe
 from halo.dast.probes.race import RaceConditionProbe
 from halo.dast.probes.workflow import WorkflowProbe, WorkflowStep
 from halo.dast.sandbox import SandboxManager
@@ -68,6 +69,7 @@ __all__ = [
     "CodeParser",
     "HypothesisGenerator",
     "IntentExtractor",
+    "MassAssignmentProbe",
     "PoCBuilder",
     "ProbeResult",
     "RaceConditionProbe",
@@ -269,6 +271,7 @@ def _execute_dynamic_probes(
                     create_ep = None
                     if recipe and recipe.extra_params.get("create_endpoint"):
                         create_ep = recipe.extra_params["create_endpoint"]
+                    is_mutation = method_str.upper() in {"PUT", "PATCH"}
                     probe_result = probe.execute(
                         client=client,
                         target_url=target_url,
@@ -276,6 +279,9 @@ def _execute_dynamic_probes(
                         recipe=recipe,
                         create_endpoint=create_ep,
                         read_endpoint_template=endpoint_path,
+                        test_write=is_mutation,
+                        write_method=method_str.upper() if is_mutation else "PUT",
+                        write_endpoint_template=endpoint_path if is_mutation else None,
                     )
                 elif "BFLA" in norm_flaw:
                     probe = BFLAProbe()
@@ -312,14 +318,14 @@ def _execute_dynamic_probes(
                         workflow_steps=wf_steps,
                     )
                 elif "MASS" in norm_flaw:
-                    probe = BOLAProbe()
+                    probe = MassAssignmentProbe()
                     probe_result = probe.execute(
                         client=client,
                         target_url=target_url,
                         vault=vault,
                         recipe=recipe,
-                        read_endpoint_template=endpoint_path,
-                        test_write=True,
+                        endpoint=endpoint_path,
+                        method=method_str,
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.debug(

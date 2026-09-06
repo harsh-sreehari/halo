@@ -142,40 +142,49 @@ if __name__ == "__main__":
             parsed_method = ""
             if " " in action_raw:
                 parts = action_raw.split(None, 1)
-                parsed_method = parts[0].upper()
-                if not step_path:
-                    step_path = parts[1]
-            elif action_raw.lower() in ("create", "post"):
-                parsed_method = "POST"
-            elif action_raw.lower() in ("read", "get"):
-                parsed_method = "GET"
-            elif action_raw.lower() == "patch":
-                parsed_method = "PATCH"
-            elif action_raw.lower() in ("update", "put"):
-                parsed_method = "PUT"
-            elif action_raw.lower() in ("delete",):
-                parsed_method = "DELETE"
-            elif action_raw.lower() == "burst":
-                parsed_method = "BURST"
-            else:
-                parsed_method = method.upper()
+                first_word = parts[0].upper()
+                if first_word in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
+                    parsed_method = first_word
+                    if not step_path and len(parts) > 1 and parts[1].startswith("/"):
+                        step_path = parts[1]
+                elif first_word == "BURST" or "burst" in action_raw.lower():
+                    parsed_method = "BURST"
 
-            if not step_path:
-                step_path = endpoint
+            if not parsed_method:
+                if action_raw.lower() in ("create", "post"):
+                    parsed_method = "POST"
+                elif action_raw.lower() in ("read", "get"):
+                    parsed_method = "GET"
+                elif action_raw.lower() == "patch":
+                    parsed_method = "PATCH"
+                elif action_raw.lower() in ("update", "put"):
+                    parsed_method = "PUT"
+                elif action_raw.lower() in ("delete",):
+                    parsed_method = "DELETE"
+                elif "burst" in action_raw.lower():
+                    parsed_method = "BURST"
+                else:
+                    parsed_method = method.upper()
+
+            if not step_path or " " in step_path:
+                step_path = step.get("path") or step.get("endpoint") or endpoint
 
             lines.append(f"{indent}# Step {i}: {actor_raw} executes {action_raw or parsed_method}")
 
             if parsed_method == "BURST":
+                burst_target = step.get("path") or step.get("endpoint") or endpoint
+                if " " in burst_target:
+                    burst_target = endpoint
                 count = step.get("count", 10)
                 lines.append(f"{indent}import concurrent.futures")
                 lines.append(f"{indent}def _send():")
                 if body is not None:
                     lines.append(
-                        f'{indent}    return client.post("{step_path}", headers={headers_var}, json={json.dumps(body)})'
+                        f'{indent}    return client.post("{burst_target}", headers={headers_var}, json={json.dumps(body)})'
                     )
                 else:
                     lines.append(
-                        f'{indent}    return client.post("{step_path}", headers={headers_var})'
+                        f'{indent}    return client.post("{burst_target}", headers={headers_var})'
                     )
                 lines.append(
                     f"{indent}with concurrent.futures.ThreadPoolExecutor(max_workers={count}) as executor:"
@@ -192,7 +201,10 @@ if __name__ == "__main__":
 
             # Check if step path contains parameter substitution
             path_repr: str
-            if "{victim_id}" in step_path or "{id}" in step_path:
+            if i > 1 and captured_id and str(captured_id) in step_path:
+                formatted_path = step_path.replace(str(captured_id), "{victim_id}")
+                path_repr = f'f"{formatted_path}"'
+            elif "{victim_id}" in step_path or "{id}" in step_path:
                 formatted_path = step_path.replace("{id}", "{victim_id}")
                 path_repr = f'f"{formatted_path}"'
             else:

@@ -1,0 +1,47 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id        String    @id @default(uuid())
+  username  String    @unique
+  email     String    @unique
+  password  String
+  role      String    @default("user")
+  invoices  Invoice[]
+  orders    Order[]
+  createdAt DateTime  @default(now())
+}
+
+model Invoice {
+  id        String   @id @default(uuid())
+  title     String
+  amount    Float
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+}
+
+model Order {
+  id        String   @id @default(uuid())
+  status    String   @default("created")
+  paid      Boolean  @default(false)
+  total     Float
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+}
+
+model Coupon {
+  id          String   @id @default(uuid())
+  code        String   @unique
+  discount    Float
+  used        Boolean  @default(false)
+  redeemCount Int      @default(0)
+  createdAt   DateTime @default(now())
+}

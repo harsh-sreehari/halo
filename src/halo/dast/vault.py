@@ -148,6 +148,7 @@ class SessionVault:
         target_url: str,
         seed_data: str | Path | dict[str, Any] | None = None,
         client: httpx.Client | None = None,
+        repo_path: str | Path | None = None,
     ) -> dict[PersonaType, IdentityPersona]:
         """Provisions personas using registration hierarchy: /register -> seed files -> manual fallback."""
         http_client = client or httpx.Client(base_url=target_url, timeout=10.0)
@@ -156,8 +157,24 @@ class SessionVault:
         reg_success = self._attempt_auto_registration(http_client)
 
         # Hierarchy Step 2: Seed file parsing fallback if registration not fully successful
-        if not reg_success and seed_data is not None:
-            self._parse_and_apply_seeds(seed_data, http_client)
+        target_seed = seed_data
+        if target_seed is None and repo_path is not None:
+            rpath = Path(repo_path)
+            for candidate_rel in (
+                "prisma/seed.ts",
+                "seed.ts",
+                "seeds/seed.ts",
+                "prisma/seed.js",
+                "seed.json",
+                "seeds.sql",
+            ):
+                cand = rpath / candidate_rel
+                if cand.is_file():
+                    target_seed = cand
+                    break
+
+        if not reg_success and target_seed is not None:
+            self._parse_and_apply_seeds(target_seed, http_client)
 
         return self.personas
 

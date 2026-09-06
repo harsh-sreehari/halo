@@ -144,6 +144,8 @@ class BOLAProbe(BaseProbe):
                     "step": 1,
                     "actor": victim_type.value,
                     "action": f"{create_method} {create_endpoint}",
+                    "path": create_endpoint,
+                    "body": create_payload,
                     "status": create_resp.status_code,
                     "captured_id": resource_id,
                     "description": f"Victim creates resource, resulting in ID '{resource_id}'",
@@ -216,6 +218,7 @@ class BOLAProbe(BaseProbe):
             "step": 2,
             "actor": victim_type.value,
             "action": f"{read_method} {resolved_read_endpoint}",
+            "path": resolved_read_endpoint,
             "status": 200,
             "description": "Victim verifies resource exists (Read-Your-Own-Writes Gate passes)",
         })
@@ -258,6 +261,8 @@ class BOLAProbe(BaseProbe):
                     "step": 3,
                     "actor": attacker_type.value,
                     "action": f"{write_method} {resolved_write_endpoint}",
+                    "path": resolved_write_endpoint,
+                    "body": mutation_body,
                     "status": attack_resp.status_code,
                     "description": f"Attacker tampers with victim resource '{resource_id}'",
                 })
@@ -303,6 +308,7 @@ class BOLAProbe(BaseProbe):
             "step": 3,
             "actor": attacker_type.value,
             "action": f"{read_method} {resolved_read_endpoint}",
+            "path": resolved_read_endpoint,
             "status": attack_resp.status_code,
             "description": f"Attacker requests victim resource '{resource_id}' across tenant boundary",
         })
