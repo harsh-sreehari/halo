@@ -36,6 +36,7 @@ htmlcov/
 *.db
 runs/
 evidence/
+ckg.json
 
 # Environment Secrets
 .env
