@@ -98,9 +98,7 @@ class MassAssignmentProbe(BaseProbe):
             if vault:
                 vault.record_request(actor_type, client=http_client, target_url=target_url)
             resp_evidence.append(
-                self.record_response_evidence(
-                    resp, actor=actor_type.value, step="tamper_mutation"
-                )
+                self.record_response_evidence(resp, actor=actor_type.value, step="tamper_mutation")
             )
         except Exception as exc:  # noqa: BLE001
             return ProbeResult(
@@ -111,20 +109,55 @@ class MassAssignmentProbe(BaseProbe):
                 details=f"Network error during mass assignment probe: {exc}",
             )
 
-        is_vuln = (
-            resp.status_code == expected_vuln_status
-            or (200 <= resp.status_code < 300 and resp.status_code != expected_safe_status)
-        )
+        is_vuln = False
+        if resp.status_code == expected_vuln_status or (
+            200 <= resp.status_code < 300 and resp.status_code != expected_safe_status
+        ):
+            # Semantic Oracle: Verify that injected attributes are actually reflected or bound in response
+            try:
+                resp_json = resp.json()
+                if isinstance(resp_json, dict):
+                    reflected = False
+                    for k, v in tamper_payload.items():
+                        if k in ("items",):
+                            continue
+                        if k in resp_json:
+                            if resp_json[k] == v or str(resp_json[k]) == str(v):
+                                reflected = True
+                                break
+                            if (
+                                isinstance(v, (int, float))
+                                and isinstance(resp_json[k], (int, float))
+                                and abs(float(resp_json[k]) - float(v)) < 1e-5
+                            ):
+                                reflected = True
+                                break
+                    if not reflected:
+                        resp_str = resp.text
+                        for k, v in tamper_payload.items():
+                            if k in ("items",):
+                                continue
+                            if f'"{k}"' in resp_str and str(v) in resp_str:
+                                reflected = True
+                                break
+                    is_vuln = reflected
+                else:
+                    is_vuln = True
+            except Exception:  # noqa: BLE001
+                resp_str = resp.text
+                is_vuln = any(str(v) in resp_str for k, v in tamper_payload.items() if k != "items")
 
-        reproduction_steps.append({
-            "step": 1,
-            "actor": actor_type.value,
-            "action": f"{method.upper()} {endpoint}",
-            "path": endpoint,
-            "body": tamper_payload,
-            "status": resp.status_code,
-            "description": f"Attacker submits tampered payload ({tamper_payload}) to {endpoint}",
-        })
+        reproduction_steps.append(
+            {
+                "step": 1,
+                "actor": actor_type.value,
+                "action": f"{method.upper()} {endpoint}",
+                "path": endpoint,
+                "body": tamper_payload,
+                "status": resp.status_code,
+                "description": f"Attacker submits tampered payload ({tamper_payload}) to {endpoint}",
+            }
+        )
 
         if is_vuln:
             observed_side_effects.append(

@@ -11,6 +11,7 @@ import httpx
 from halo.dast.probes import ProbeResult
 from halo.dast.probes.bfla import BFLAProbe
 from halo.dast.probes.bola import BOLAProbe
+from halo.dast.probes.mass_assignment import MassAssignmentProbe
 from halo.dast.probes.race import RaceConditionProbe
 from halo.dast.probes.workflow import WorkflowProbe, WorkflowStep
 from halo.dast.vault import PersonaType, SessionVault
@@ -133,7 +134,9 @@ def test_bola_probe_write_mutation():
     )
     assert result.vulnerable is True
     assert result.flaw_type == "BOLA_IDOR"
-    assert any("mutation" in se.lower() or "tamper" in se.lower() for se in result.observed_side_effects)
+    assert any(
+        "mutation" in se.lower() or "tamper" in se.lower() for se in result.observed_side_effects
+    )
     assert items["item_99"]["name"] == "tampered_by_user_a"
 
 
@@ -174,6 +177,7 @@ def test_bola_probe_read_your_own_writes_gate_retry():
 
 def test_bola_probe_with_recipe_object():
     """Verify BOLAProbe accepts ProbingRecipe from hypothesis generator."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
             return httpx.Response(201, json={"id": "obj_001"})
@@ -208,6 +212,7 @@ def test_bola_probe_with_recipe_object():
 
 def test_bfla_probe_detects_role_escalation():
     """Verify BFLAProbe detects standard user accessing admin route."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         auth = request.headers.get("Authorization", "")
         if request.url.path == "/api/admin/users":
@@ -238,11 +243,14 @@ def test_bfla_probe_detects_role_escalation():
     assert result.flaw_type == "BFLA"
     assert result.endpoint == "/api/admin/users"
     assert result.confidence >= 0.85
-    assert any("Standard user" in se or "escalation" in se.lower() for se in result.observed_side_effects)
+    assert any(
+        "Standard user" in se or "escalation" in se.lower() for se in result.observed_side_effects
+    )
 
 
 def test_bfla_probe_detects_missing_authentication():
     """Verify BFLAProbe detects completely unauthenticated access to administrative route."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         # Route has zero authentication checks!
         if request.url.path == "/api/admin/export":
@@ -264,11 +272,14 @@ def test_bfla_probe_detects_missing_authentication():
     )
     assert result.vulnerable is True
     assert result.flaw_type == "BFLA"
-    assert any("Unauthenticated" in se or "missing" in se.lower() for se in result.observed_side_effects)
+    assert any(
+        "Unauthenticated" in se or "missing" in se.lower() for se in result.observed_side_effects
+    )
 
 
 def test_bfla_probe_enforced_access_control():
     """Verify BFLAProbe reports secure when standard and unauthenticated actors are rejected."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         auth = request.headers.get("Authorization", "")
         if request.url.path == "/api/admin/settings":
@@ -295,11 +306,16 @@ def test_bfla_probe_enforced_access_control():
     )
     assert result.vulnerable is False
     assert result.flaw_type == "BFLA"
-    assert "restricted" in result.details.lower() or "enforced" in result.details.lower() or "403" in result.details
+    assert (
+        "restricted" in result.details.lower()
+        or "enforced" in result.details.lower()
+        or "403" in result.details
+    )
 
 
 def test_bfla_probe_admin_baseline_failure():
     """Verify BFLAProbe aborts and flags false if admin baseline route check fails (404/500)."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"error": "not found"})
 
@@ -365,7 +381,10 @@ def test_race_condition_probe_detects_multiplication():
     assert result.flaw_type == "RACE_CONDITION"
     assert result.endpoint == "/api/coupons/redeem"
     assert len(result.observed_side_effects) > 0
-    assert any("multiplication" in se.lower() or "concurrent" in se.lower() for se in result.observed_side_effects)
+    assert any(
+        "multiplication" in se.lower() or "concurrent" in se.lower()
+        for se in result.observed_side_effects
+    )
 
 
 def test_race_condition_probe_enforces_atomicity():
@@ -399,7 +418,11 @@ def test_race_condition_probe_enforces_atomicity():
     )
     assert result.vulnerable is False
     assert result.flaw_type == "RACE_CONDITION"
-    assert "atomic" in result.details.lower() or "prevented" in result.details.lower() or "secure" in result.details.lower()
+    assert (
+        "atomic" in result.details.lower()
+        or "prevented" in result.details.lower()
+        or "secure" in result.details.lower()
+    )
 
 
 def test_race_condition_alpn_negotiation_fallback():
@@ -444,8 +467,12 @@ def test_workflow_probe_detects_step_skipping():
 
     steps = [
         WorkflowStep(name="cart", endpoint="/api/cart", method="POST", payload={"item": "laptop"}),
-        WorkflowStep(name="payment", endpoint="/api/payment", method="POST", payload={"amount": 1000}),
-        WorkflowStep(name="ship", endpoint="/api/ship", method="POST", payload={"address": "Main St"}),
+        WorkflowStep(
+            name="payment", endpoint="/api/payment", method="POST", payload={"amount": 1000}
+        ),
+        WorkflowStep(
+            name="ship", endpoint="/api/ship", method="POST", payload={"address": "Main St"}
+        ),
     ]
 
     probe = WorkflowProbe()
@@ -458,12 +485,15 @@ def test_workflow_probe_detects_step_skipping():
     assert isinstance(result, ProbeResult)
     assert result.vulnerable is True
     assert result.flaw_type == "WORKFLOW_BYPASS"
-    assert any("payment" in se.lower() or "skip" in se.lower() for se in result.observed_side_effects)
+    assert any(
+        "payment" in se.lower() or "skip" in se.lower() for se in result.observed_side_effects
+    )
     assert len(result.reproduction_steps) > 0
 
 
 def test_workflow_probe_detects_step_reordering():
     """Verify WorkflowProbe detects executing a terminal step before prerequisite setup."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         # Vulnerable: permits instant finalization even without prior steps
         if request.url.path == "/api/account/upgrade/finalize":
@@ -596,12 +626,15 @@ def test_race_condition_h2_transmitted_no_destructive_fallback(monkeypatch):
         method="POST",
         force_h2=True,
     )
-    assert h1_called[0] is False, "H1.1 fallback should NOT be called if H2 packets were transmitted"
+    assert h1_called[0] is False, (
+        "H1.1 fallback should NOT be called if H2 packets were transmitted"
+    )
     assert result.vulnerable is False
 
 
 def test_race_condition_vault_heartbeat_tracking():
     """Verify request counts are recorded in SessionVault during concurrency race bursts."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"ok": True})
 
@@ -718,3 +751,56 @@ def test_bola_probe_multi_param_path_replacement():
     )
     assert path_2 == "/api/v1/tenants/{tenant_id}/orders/ord_777"
 
+
+def test_mass_assignment_probe_detects_reflected_tampering():
+    """Verify MassAssignmentProbe flags vulnerability when injected parameter is reflected in response."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"orderId": "123", "total": data.get("total", 100.0)})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
+    probe = MassAssignmentProbe()
+    res = probe.execute(
+        client=client, endpoint="/api/cart/checkout", method="POST", payload={"total": 0.01}
+    )
+    assert res.vulnerable is True
+    assert res.flaw_type == "MASS_ASSIGNMENT"
+
+
+def test_mass_assignment_probe_rejects_ignored_attributes():
+    """Verify MassAssignmentProbe does not falsely flag 200 responses that ignore the injected attribute."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "ok", "message": "Updated without extra fields"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
+    probe = MassAssignmentProbe()
+    res = probe.execute(
+        client=client, endpoint="/api/user/profile", method="PUT", payload={"role": "admin"}
+    )
+    assert res.vulnerable is False
+
+
+def test_race_condition_generic_promo_payload():
+    """Verify RaceConditionProbe falls back to generic PROMO payload without hardcoded testbed seed."""
+    captured_payload = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_payload
+        captured_payload = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"redeemed": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
+    probe = RaceConditionProbe()
+    # Force single request to inspect payload
+    probe._h1_burst = lambda client, ep, m, p, h, bs, to: [
+        httpx.Response(200, json={"redeemed": True}),
+        httpx.Response(200, json={"redeemed": True}),
+    ]
+    res = probe.execute(
+        client=client, endpoint="/api/v1/coupons/apply", method="POST", force_h2=False
+    )
+    assert res.vulnerable is True
+    assert "DISCOUNT50" not in str(res.request_evidence)
+    assert any("PROMO" in str(req) for req in res.request_evidence)

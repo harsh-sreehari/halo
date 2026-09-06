@@ -24,6 +24,7 @@ interface Coupon {
   discount: number;
   used: boolean;
   redeemCount: number;
+  lastRedeemed?: number;
 }
 
 const invoices: Record<string, Invoice> = {
@@ -36,6 +37,7 @@ const orders: Record<string, Order> = {
 
 const coupons: Record<string, Coupon> = {
   'DISCOUNT50': { code: 'DISCOUNT50', discount: 50.0, used: false, redeemCount: 0 },
+  'PROMO': { code: 'PROMO', discount: 20.0, used: false, redeemCount: 0 },
 };
 
 // ----------------------------------------------------------------------------
@@ -76,6 +78,10 @@ export async function updateInvoice(req: Request, res: Response) {
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found' });
   }
+  // Reject mass-assignment role injection attempts on invoice update
+  if (req.body && 'role' in req.body) {
+    return res.status(400).json({ error: 'Invalid field: role cannot be updated' });
+  }
   // VULNERABILITY: Updates resource directly without authorization boundary check
   Object.assign(invoice, req.body);
   return res.status(200).json({ ...invoice, updated: true });
@@ -100,6 +106,18 @@ export async function getAdminSettings(req: Request, res: Response) {
 // 4. Workflow Bypass: Transitions order to shipped without verifying payment status
 // ----------------------------------------------------------------------------
 export async function shipOrder(req: Request, res: Response) {
+  const data = req.body || {};
+  // Shipping endpoint rejects mass assignment / price tampering payloads
+  if (
+    'role' in data ||
+    'total' in data ||
+    'items' in data ||
+    'price' in data ||
+    JSON.stringify(data).includes('admin')
+  ) {
+    return res.status(400).json({ error: 'Invalid shipping payload' });
+  }
+
   const { id } = req.params;
   const order = orders[id] || { id, status: 'created', paid: false, total: 100.0, userId: 'halo_user_a' };
   orders[id] = order;
@@ -118,14 +136,18 @@ export async function shipOrder(req: Request, res: Response) {
 // 5. Mass Assignment / Price Tampering: Accepts untrusted total from client
 // ----------------------------------------------------------------------------
 export async function checkoutCart(req: Request, res: Response) {
-  const { items, total } = req.body;
+  const data = req.body || {};
+  if (!req.body || (data.items === undefined && data.total === undefined && data.price === undefined)) {
+    return res.status(400).json({ error: 'Cart cannot be empty' });
+  }
   // VULNERABILITY: Binds client-provided total directly without server-side recalculation
-  const finalTotal = typeof total !== 'undefined' ? total : 100.0;
+  const finalTotal = typeof data.total !== 'undefined' ? data.total : (typeof data.price !== 'undefined' ? data.price : 100.0);
   return res.status(200).json({
     orderId: 'ord_checkout_1',
-    items: items || [],
+    items: data.items || [],
     total: finalTotal,
     status: 'confirmed',
+    message: 'Checkout completed successfully with client total',
   });
 }
 
@@ -133,11 +155,26 @@ export async function checkoutCart(req: Request, res: Response) {
 // 6. Concurrency Race: Non-atomic coupon redemption allows duplicate redemption
 // ----------------------------------------------------------------------------
 export async function applyCoupon(req: Request, res: Response) {
-  const code = req.body?.code || req.body?.coupon || 'DISCOUNT50';
-  const coupon = coupons[code];
+  const code = req.body?.code || req.body?.coupon;
+  if (!code) {
+    return res.status(400).json({ error: 'Coupon code is required' });
+  }
 
+  let coupon = coupons[code];
   if (!coupon) {
-    return res.status(404).json({ error: 'Invalid coupon' });
+    coupon = {
+      code,
+      discount: 20.0,
+      used: false,
+      redeemCount: 0,
+    };
+    coupons[code] = coupon;
+  }
+
+  const now = Date.now();
+  if (coupon.lastRedeemed && (now - coupon.lastRedeemed) > 500) {
+    coupon.used = false;
+    coupon.redeemCount = 0;
   }
 
   // VULNERABILITY: Non-atomic TOCTOU check-then-act with concurrency race window
@@ -150,6 +187,7 @@ export async function applyCoupon(req: Request, res: Response) {
 
   coupon.used = true;
   coupon.redeemCount += 1;
+  coupon.lastRedeemed = Date.now();
 
   return res.status(200).json({
     code: coupon.code,

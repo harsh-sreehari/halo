@@ -194,7 +194,7 @@ if __name__ == "__main__":
                 )
                 lines.append(f"{indent}    statuses = [f.result().status_code for f in futures]")
                 lines.append(
-                    f'{indent}assert statuses.count(200) > 1 or any(s < 400 for s in statuses), f"Race condition not observed: {{statuses}}"'
+                    f'{indent}assert sum(1 for s in statuses if 200 <= s < 300) > 1, f"Race condition not observed: {{statuses}}"'
                 )
                 lines.append("")
                 continue

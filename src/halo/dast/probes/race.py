@@ -97,9 +97,13 @@ class RaceConditionProbe(BaseProbe):
         if payload is None:
             ep_lower = endpoint.lower()
             if any(k in ep_lower for k in ("coupon", "voucher", "discount", "promo", "code")):
-                payload = {"code": "DISCOUNT50", "coupon": "DISCOUNT50"}
+                payload = {"code": "PROMO", "coupon": "PROMO"}
 
-        actor_type = PersonaType.from_str(actor) if isinstance(actor, (PersonaType, str)) else PersonaType.USER_A
+        actor_type = (
+            PersonaType.from_str(actor)
+            if isinstance(actor, (PersonaType, str))
+            else PersonaType.USER_A
+        )
         req_headers = dict(vault.get_headers(actor_type) if vault else {})
         if headers:
             req_headers.update(headers)
@@ -173,7 +177,9 @@ class RaceConditionProbe(BaseProbe):
         # Record response samples for evidence
         for idx, resp in enumerate(responses[:5]):
             resp_evidence.append(
-                self.record_response_evidence(resp, actor=actor_type.value, step=f"burst_response_{idx + 1}")
+                self.record_response_evidence(
+                    resp, actor=actor_type.value, step=f"burst_response_{idx + 1}"
+                )
             )
 
         # 3. State Multiplication Gate
@@ -186,13 +192,23 @@ class RaceConditionProbe(BaseProbe):
         if verify_endpoint:
             target_client = client or httpx.Client(base_url=target_url, timeout=5.0)
             try:
-                state_resp = target_client.request(verify_method, verify_endpoint, headers=req_headers)
+                state_resp = target_client.request(
+                    verify_method, verify_endpoint, headers=req_headers
+                )
                 resp_evidence.append(
-                    self.record_response_evidence(state_resp, actor=actor_type.value, step="post_burst_state_read")
+                    self.record_response_evidence(
+                        state_resp, actor=actor_type.value, step="post_burst_state_read"
+                    )
                 )
                 if state_resp.status_code == 200:
-                    state_data = state_resp.json() if "json" in state_resp.headers.get("content-type", "") else state_resp.text
-                    observed_side_effects.append(f"Post-burst state verified on {verify_endpoint}: {state_data}")
+                    state_data = (
+                        state_resp.json()
+                        if "json" in state_resp.headers.get("content-type", "")
+                        else state_resp.text
+                    )
+                    observed_side_effects.append(
+                        f"Post-burst state verified on {verify_endpoint}: {state_data}"
+                    )
                     post_state_verified = True
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Verification read on %s failed: %s", verify_endpoint, exc)
@@ -201,22 +217,26 @@ class RaceConditionProbe(BaseProbe):
             try:
                 callback_result = verify_callback(responses)
                 if callback_result:
-                    observed_side_effects.append("Custom state multiplication callback verified anomaly.")
+                    observed_side_effects.append(
+                        "Custom state multiplication callback verified anomaly."
+                    )
                     post_state_verified = True
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Verification callback error: %s", exc)
 
-        reproduction_steps.append({
-            "step": 1,
-            "actor": actor_type.value,
-            "action": f"Burst {burst_size} synchronized concurrent {method} requests to {endpoint}",
-            "path": endpoint,
-            "count": min(burst_size, 10),
-            "payload": payload,
-            "successful_requests": success_count,
-            "total_requests": len(responses),
-            "description": f"Released {burst_size} concurrent requests simultaneously via {'HTTP/2 multiplexing' if use_h2 else 'H1.1 barrier pool'}",
-        })
+        reproduction_steps.append(
+            {
+                "step": 1,
+                "actor": actor_type.value,
+                "action": f"Burst {burst_size} synchronized concurrent {method} requests to {endpoint}",
+                "path": endpoint,
+                "count": min(burst_size, 10),
+                "payload": payload,
+                "successful_requests": success_count,
+                "total_requests": len(responses),
+                "description": f"Released {burst_size} concurrent requests simultaneously via {'HTTP/2 multiplexing' if use_h2 else 'H1.1 barrier pool'}",
+            }
+        )
 
         if success_count > max_allowed_successes:
             observed_side_effects.append(
@@ -415,8 +435,16 @@ class RaceConditionProbe(BaseProbe):
                             status = 200
                             resp_hdrs: dict[str, str] = {}
                             for k, v in ev.headers:
-                                k_str = k.decode("utf-8", errors="ignore") if isinstance(k, bytes) else str(k)
-                                v_str = v.decode("utf-8", errors="ignore") if isinstance(v, bytes) else str(v)
+                                k_str = (
+                                    k.decode("utf-8", errors="ignore")
+                                    if isinstance(k, bytes)
+                                    else str(k)
+                                )
+                                v_str = (
+                                    v.decode("utf-8", errors="ignore")
+                                    if isinstance(v, bytes)
+                                    else str(v)
+                                )
                                 if k_str == ":status":
                                     status = int(v_str)
                                 else:

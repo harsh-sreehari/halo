@@ -221,6 +221,7 @@ def test_poc_builder_bfla_and_race_flaws():
     )
     assert "RACE_CONDITION" in race_script
     assert "def test_reproduction():" in race_script
+    assert "assert sum(1 for s in statuses if 200 <= s < 300) > 1" in race_script
     ast.parse(race_script)
 
 

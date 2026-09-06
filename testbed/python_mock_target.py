@@ -74,7 +74,13 @@ class MockTargetState:
                     "discount": 50.0,
                     "used": False,
                     "redeem_count": 0,
-                }
+                },
+                "PROMO": {
+                    "code": "PROMO",
+                    "discount": 20.0,
+                    "used": False,
+                    "redeem_count": 0,
+                },
             }
             self.cart_checked_out: bool = False
 
@@ -309,8 +315,13 @@ class MockTargetHandler(BaseHTTPRequestHandler):
 
             coupon = global_state.coupons.get(code)
             if not coupon:
-                self._send_json(404, {"error": "Coupon not found"})
-                return
+                coupon = {
+                    "code": code,
+                    "discount": 20.0,
+                    "used": False,
+                    "redeem_count": 0,
+                }
+                global_state.coupons[code] = coupon
 
             now = time.time()
             # If coupon was redeemed more than 0.5 seconds ago, auto-reset for reproduction scripts

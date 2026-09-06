@@ -172,6 +172,10 @@ def test_mock_target_server_direct_endpoints() -> None:
             assert r_inv_write.status_code == 200
             assert r_inv_write.json()["amount"] == 999.0
 
+            # BOLA write rejects role injection
+            r_inv_role = client.put("/api/v1/invoices/inv-b-1", json={"role": "admin"})
+            assert r_inv_role.status_code == 400
+
             # 4. BFLA
             r_admin = client.get("/api/v1/admin/settings")
             assert r_admin.status_code == 200
@@ -182,7 +186,14 @@ def test_mock_target_server_direct_endpoints() -> None:
             assert r_ship.status_code == 200
             assert r_ship.json()["status"] == "shipped"
 
+            # Workflow ship rejects mass assignment payload
+            r_ship_bad = client.post("/api/v1/orders/1/ship", json={"role": "admin"})
+            assert r_ship_bad.status_code == 400
+
             # 6. Mass Assignment / Price Tamper
+            r_cart_empty = client.post("/api/v1/cart/checkout", json={})
+            assert r_cart_empty.status_code == 400
+
             r_cart = client.post(
                 "/api/v1/cart/checkout",
                 json={"items": [{"id": "1", "price": 100}], "total": 0.01},
@@ -194,6 +205,10 @@ def test_mock_target_server_direct_endpoints() -> None:
             r_coupon = client.post("/api/v1/coupons/apply", json={"code": "DISCOUNT50"})
             assert r_coupon.status_code == 200
             assert r_coupon.json()["redeemed"] is True
+
+            r_promo = client.post("/api/v1/coupons/apply", json={"code": "PROMO"})
+            assert r_promo.status_code == 200
+            assert r_promo.json()["redeemed"] is True
     finally:
         server.shutdown()
         server.server_close()
