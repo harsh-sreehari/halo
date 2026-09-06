@@ -249,6 +249,7 @@ def print_scan_summary(
     duration_secs: float,
     report_paths: dict[str, str] | None = None,
     console: Console | None = None,
+    token_stats: Any = None,
 ) -> Panel:
     """Format and display a structured summary panel."""
     con = console or Console()
@@ -259,6 +260,22 @@ def print_scan_summary(
         f"[bold]Verified Vulnerabilities:[/bold]    [red]{total_findings}[/red]",
         f"[bold]Scan Duration:[/bold]               [white]{duration_secs:.2f}s[/white]",
     ]
+
+    if token_stats is not None:
+        consumed = getattr(token_stats, "total_tokens", None)
+        if consumed is None and isinstance(token_stats, dict):
+            consumed = token_stats.get("total_tokens", 0)
+            reqs = token_stats.get("request_count", 0)
+            in_tok = token_stats.get("total_input_tokens", 0)
+            out_tok = token_stats.get("total_output_tokens", 0)
+        else:
+            reqs = getattr(token_stats, "request_count", 0)
+            in_tok = getattr(token_stats, "total_input_tokens", 0)
+            out_tok = getattr(token_stats, "total_output_tokens", 0)
+            consumed = consumed or 0
+
+        lines.append(f"[bold]LLM API Invocations:[/bold]      [cyan]{reqs}[/cyan]")
+        lines.append(f"[bold]Tokens Consumed:[/bold]           [magenta]{consumed:,} tokens[/magenta] (in: {in_tok:,}, out: {out_tok:,})")
 
     if report_paths:
         lines.append("")

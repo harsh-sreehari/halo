@@ -540,13 +540,23 @@ def scan(
     report_sarif_path = out_path / "halo_report.sarif"
     report_md_path = out_path / "halo_report.md"
 
-    ReportGenerator.export_json(verified_findings, report_json_path)
+    stats = governor.get_stats()
+    duration = time.time() - start_time
+    scan_meta = {
+        "duration_seconds": round(duration, 2),
+        "total_routes": len(routes),
+        "total_candidates": len(suspects),
+        "llm_provider": llm_provider_name,
+        "llm_model": getattr(llm_provider, "model", llm_provider_name),
+        "token_usage": stats.model_dump(),
+    }
+
+    ReportGenerator.export_json(verified_findings, report_json_path, metadata=scan_meta)
     ReportGenerator.export_sarif(verified_findings, report_sarif_path)
-    ReportGenerator.export_markdown(verified_findings, report_md_path)
+    ReportGenerator.export_markdown(verified_findings, report_md_path, metadata=scan_meta)
 
     render_findings_table(verified_findings, console=console)
 
-    duration = time.time() - start_time
     reports_map = {
         "JSON Report": str(report_json_path),
         "SARIF Report": str(report_sarif_path),
@@ -559,6 +569,7 @@ def scan(
         duration_secs=duration,
         report_paths=reports_map,
         console=console,
+        token_stats=stats,
     )
 
 

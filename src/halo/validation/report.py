@@ -90,7 +90,10 @@ class ReportGenerator:
 
     @classmethod
     def export_json(
-        cls, findings: list[FindingRecord | dict[str, Any]], out_path: str | Path
+        cls,
+        findings: list[FindingRecord | dict[str, Any]],
+        out_path: str | Path,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Export findings to structured JSON with metadata and CVSS metrics."""
         path = Path(out_path)
@@ -116,6 +119,8 @@ class ReportGenerator:
             "total_findings": len(records),
             "findings": findings_data,
         }
+        if metadata:
+            report_dict["metadata"] = metadata
 
         path.write_text(json.dumps(report_dict, indent=2), encoding="utf-8")
         return report_dict
