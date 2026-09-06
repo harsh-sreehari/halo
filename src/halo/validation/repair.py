@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 import re
@@ -35,6 +36,26 @@ class PoCRepairLoop:
         """
         if self.runner is not None:
             return self.runner(script_content)
+
+        # Safety gate: verify AST parse and block suspicious shell/subprocess execution
+        try:
+            tree = ast.parse(script_content)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    if isinstance(func, ast.Attribute) and func.attr in (
+                        "system",
+                        "popen",
+                        "spawn",
+                        "rmtree",
+                    ):
+                        return (
+                            1,
+                            "",
+                            f"Safety gate rejected execution: detected potentially destructive call '{func.attr}'",
+                        )
+        except SyntaxError as err:
+            return 1, "", f"Syntax error in script: {err}"
 
         # Execute in subprocess
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:

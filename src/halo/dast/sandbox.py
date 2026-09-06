@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import socket
 import subprocess
@@ -104,20 +105,26 @@ class SandboxManager:
 
         # In Safe Mode against remote targets, mutations must strictly use synthetic identities
         clean_identity = (identity or "").lower()
-        if not any(clean_identity.startswith(syn) or clean_identity == syn for syn in SYNTHETIC_IDENTITIES):
+        if not any(
+            clean_identity.startswith(syn) or clean_identity == syn for syn in SYNTHETIC_IDENTITIES
+        ):
             return False, (
                 f"Safe Mode Guardrail: Mutation via {upper_method} on remote target {target_url} "
                 f"is blocked for non-synthetic identity '{identity}'. Only synthetic personas permitted."
             )
 
         # Destructive operations (DELETE or mutating foreign entities)
-        if upper_method == "DELETE" and (not resource_owner or resource_owner.lower() != clean_identity):
+        if upper_method == "DELETE" and (
+            not resource_owner or resource_owner.lower() != clean_identity
+        ):
             return False, (
                 f"Safe Mode Guardrail: Destructive DELETE operation on remote entity at {path} "
                 f"is blocked against foreign resource owner '{resource_owner}'."
             )
 
-        if upper_method in ("PUT", "PATCH", "POST") and (resource_owner and resource_owner.lower() not in SYNTHETIC_IDENTITIES):
+        if upper_method in ("PUT", "PATCH", "POST") and (
+            resource_owner and resource_owner.lower() not in SYNTHETIC_IDENTITIES
+        ):
             return False, (
                 f"Safe Mode Guardrail: Destructive mutation ({upper_method}) on foreign entity "
                 f"owned by '{resource_owner}' is blocked."
@@ -160,7 +167,8 @@ class SandboxManager:
             raise RuntimeError(f"Container runtime '{self.runtime}' not available in PATH.")
 
         # Construct image tag
-        image_tag = f"halo-sandbox-{repo_dir.name.lower()}:{int(time.time())}"
+        sanitized_name = re.sub(r"[^a-z0-9_.-]", "-", repo_dir.name.lower()).strip("-") or "app"
+        image_tag = f"halo-sandbox-{sanitized_name}:{int(time.time())}"
 
         # 1. Build image
         build_cmd = [self.runtime, "build", "-t", image_tag]
@@ -249,7 +257,9 @@ class SandboxManager:
             resp = httpx.get(probe_url, timeout=2.0)
             if resp.status_code < 500:
                 return True
-            logger.debug("Readiness endpoint %s returned %d, testing base URL", probe_url, resp.status_code)
+            logger.debug(
+                "Readiness endpoint %s returned %d, testing base URL", probe_url, resp.status_code
+            )
         except httpx.HTTPError as err:
             logger.debug("Readiness probe error on %s: %s, testing base URL", probe_url, err)
 

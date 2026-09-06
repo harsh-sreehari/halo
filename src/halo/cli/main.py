@@ -50,6 +50,7 @@ from halo.validation.cvss import CVSSCalculator
 from halo.validation.models import FindingRecord
 from halo.validation.patcher import RemediationPatcher
 from halo.validation.poc_builder import PoCBuilder
+from halo.validation.repair import PoCRepairLoop
 from halo.validation.report import ReportGenerator
 
 logger = logging.getLogger(__name__)
@@ -387,6 +388,16 @@ def scan(
         ".", "--out", "--output-dir", "-o", help="Output directory for reports and PoCs"
     ),
     token_budget: int = typer.Option(150000, "--token-budget", help="LLM token budget limit"),
+    llm_provider_name: str = typer.Option(
+        os.environ.get("HALO_LLM_PROVIDER", "mock"),
+        "--llm-provider",
+        help="LLM provider name (mock, openai, anthropic, gemini, ollama, auto)",
+    ),
+    verify_pocs: bool = typer.Option(
+        False,
+        "--verify-pocs/--no-verify-pocs",
+        help="Verify and repair generated PoCs against target URL",
+    ),
 ) -> None:
     """Run full end-to-end hybrid security audit (SAST + Intent + DAST + PoC Verification)."""
     start_time = time.time()
@@ -421,7 +432,7 @@ def scan(
     render_candidates_table(suspects, console=console)
 
     governor = TokenGovernor(max_budget=token_budget)
-    llm_provider = get_llm_provider("mock", governor=governor)
+    llm_provider = get_llm_provider(llm_provider_name, governor=governor)
     hypothesis_gen = HypothesisGenerator(llm_provider=llm_provider)
     hypotheses = hypothesis_gen.generate_hypotheses(suspects, ckg=ckg)
     console.print(f"[dim]Generated {len(hypotheses)} probing hypotheses.[/dim]")
@@ -482,6 +493,13 @@ def scan(
     for finding in verified_findings:
         # Generate standalone PEP 723 PoC
         poc_code = poc_builder.generate_pep723_script(finding)
+        if verify_pocs and (url or (docker and target_url)):
+            t_url = finding.target_url or target_url or url or ""
+            repair_loop = PoCRepairLoop(llm_provider=llm_provider)
+            _, poc_code = repair_loop.repair_and_verify(
+                script_content=poc_code,
+                target_url=t_url,
+            )
         poc_filename = f"repro_{finding.id.lower().replace('-', '_')}.py"
         (out_path / poc_filename).write_text(poc_code, encoding="utf-8")
 
@@ -580,6 +598,11 @@ def dast(
     output_dir: str = typer.Option(
         ".", "--out", "--output-dir", "-o", help="Output directory for reports and PoCs"
     ),
+    verify_pocs: bool = typer.Option(
+        False,
+        "--verify-pocs/--no-verify-pocs",
+        help="Verify and repair generated PoCs against target URL",
+    ),
 ) -> None:
     """Run autonomous DAST active verification against a live target."""
     start_time = time.time()
@@ -642,6 +665,12 @@ def dast(
     patcher = RemediationPatcher()
     for finding in verified_findings:
         poc_code = poc_builder.generate_pep723_script(finding)
+        if verify_pocs and url:
+            repair_loop = PoCRepairLoop()
+            _, poc_code = repair_loop.repair_and_verify(
+                script_content=poc_code,
+                target_url=finding.target_url or url,
+            )
         poc_filename = f"repro_{finding.id.lower().replace('-', '_')}.py"
         (out_path / poc_filename).write_text(poc_code, encoding="utf-8")
 

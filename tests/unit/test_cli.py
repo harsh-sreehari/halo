@@ -508,3 +508,29 @@ def test_cli_scan_executes_workflow_and_race_probes():
             assert (out_dir / "halo_report.json").exists()
             assert len(list(out_dir.glob("patch_*.md"))) == 2
             assert len(list(out_dir.glob("repro_*.py"))) == 2
+
+
+def test_cli_scan_with_llm_provider_and_verify_pocs(tmp_path):
+    """Verify scan command respects --llm-provider and --verify-pocs flags."""
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "api.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/test')\ndef t(): pass\n"
+    )
+    out_dir = tmp_path / "out"
+
+    res = runner.invoke(
+        app,
+        [
+            "scan",
+            "--repo",
+            str(root),
+            "--out",
+            str(out_dir),
+            "--llm-provider",
+            "mock",
+            "--verify-pocs",
+        ],
+    )
+    assert res.exit_code == 0
+    assert (out_dir / "halo_report.json").exists()
