@@ -8,6 +8,7 @@ from halo.static.graph import (
     RouteNode,
     SinkNode,
     ValidationSchemaNode,
+    is_authorization_guard,
 )
 
 
@@ -304,4 +305,20 @@ def test_route_level_protected_by_guard():
 
     assert ckg.is_route_guarded("r_public") is False
     assert len(ckg.find_candidate_sinks("r_public")) == 1
+
+
+def test_deny_guard_recognition():
+    guard1 = MiddlewareNode(id="g1", name="security.denyAll()", type="AUTHZ")
+    guard2 = MiddlewareNode(id="g2", name="denyAccess", type="AUTHZ")
+    guard3 = MiddlewareNode(id="g3", name="rejectUnauthorized", type="AUTHZ")
+    guard4 = MiddlewareNode(id="g4", name="blockForbidden", type="AUTHZ")
+    assert is_authorization_guard(guard1)
+    assert is_authorization_guard(guard2)
+    assert is_authorization_guard(guard3)
+    assert is_authorization_guard(guard4)
+
+    # Also test HandlerNode with deny patterns
+    h1 = HandlerNode(id="h1", name="denyAllAccess", file_path="auth.js")
+    assert is_authorization_guard(h1)
+
 

@@ -344,3 +344,18 @@ router.route(`/api/v1/orders`).post(createOrderHandler);
     assert routes[1].method == "POST"
     assert routes[1].handler_name == "createOrderHandler"
 
+
+def test_express_chained_middleware_deduplication():
+    code = """
+    app.post('/api/Users', security.denyAll());
+    app.post('/api/Users', validateUserInput);
+    app.post('/api/Users', createUserHandler);
+    """
+    parser = CodeParser()
+    routes = parser.extract_routes("server.js", code=code, language="javascript")
+    user_post_routes = [r for r in routes if r.path == "/api/Users" and r.method == "POST"]
+    assert len(user_post_routes) == 1
+    assert any("denyAll" in mw for mw in user_post_routes[0].middleware)
+    assert user_post_routes[0].handler_name == "createUserHandler"
+
+

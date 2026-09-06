@@ -234,13 +234,81 @@ class CodeParser:
         code_bytes = parse_result.code.encode("utf-8")
 
         if lang == "python":
-            return self._extract_python_routes(tree, code_bytes, parse_result.file_path)
+            routes = self._extract_python_routes(tree, code_bytes, parse_result.file_path)
         elif lang in ("javascript", "typescript"):
-            return self._extract_js_routes(tree, code_bytes, parse_result.file_path)
+            routes = self._extract_js_routes(tree, code_bytes, parse_result.file_path)
         elif lang == "php":
-            return self._extract_php_routes(tree, code_bytes, parse_result.file_path)
+            routes = self._extract_php_routes(tree, code_bytes, parse_result.file_path)
         else:
-            return []
+            routes = []
+        return self._deduplicate_routes(routes)
+
+    def _deduplicate_routes(self, routes: list[RouteDefinition]) -> list[RouteDefinition]:
+        """Deduplicate routes by (method, normalized_path) and aggregate chained middlewares."""
+        merged: dict[tuple[str, str], RouteDefinition] = {}
+        for r in routes:
+            key = (r.method.upper(), r.normalized_path or r.path)
+            if key not in merged:
+                merged[key] = r
+                continue
+
+            existing = merged[key]
+            combined_mw = list(existing.middleware)
+
+            is_existing_guard = any(
+                t in existing.handler_name.lower()
+                for t in (
+                    "deny",
+                    "auth",
+                    "guard",
+                    "role",
+                    "check",
+                    "valid",
+                    "perm",
+                    "reject",
+                    "block",
+                    "forbidden",
+                )
+            ) or existing.handler_name.endswith("()")
+
+            is_r_guard = any(
+                t in r.handler_name.lower()
+                for t in (
+                    "deny",
+                    "auth",
+                    "guard",
+                    "role",
+                    "check",
+                    "valid",
+                    "perm",
+                    "reject",
+                    "block",
+                    "forbidden",
+                )
+            ) or r.handler_name.endswith("()")
+
+            if existing.handler_name and (is_existing_guard or r.handler_name):
+                if existing.handler_name not in combined_mw and existing.handler_name != r.handler_name:
+                    combined_mw.append(existing.handler_name)
+
+            for mw in r.middleware:
+                if mw not in combined_mw:
+                    combined_mw.append(mw)
+
+            new_handler = existing.handler_name
+            if is_existing_guard and r.handler_name and not is_r_guard:
+                new_handler = r.handler_name
+            elif not existing.handler_name and r.handler_name:
+                new_handler = r.handler_name
+            elif r.handler_name and is_r_guard and r.handler_name not in combined_mw:
+                combined_mw.append(r.handler_name)
+
+            existing.middleware = combined_mw
+            existing.handler_name = new_handler
+            if r.param_constraints:
+                existing.param_constraints.update(r.param_constraints)
+
+        return list(merged.values())
 
     def extract_handlers(
         self,

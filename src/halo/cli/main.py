@@ -197,7 +197,18 @@ def build_ckg_from_repo(
                 for mid_idx, mid_name in enumerate(r.middleware):
                     is_guard = any(
                         token in mid_name.lower()
-                        for token in ("auth", "guard", "role", "perm", "owner", "check")
+                        for token in (
+                            "auth",
+                            "guard",
+                            "role",
+                            "perm",
+                            "owner",
+                            "check",
+                            "deny",
+                            "reject",
+                            "block",
+                            "forbidden",
+                        )
                     )
                     m_node = MiddlewareNode(
                         id=f"mid_{route_counter}_{mid_idx}_{mid_name}",

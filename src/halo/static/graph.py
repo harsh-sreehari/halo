@@ -98,13 +98,23 @@ def is_authorization_guard(node: BaseNode | None) -> bool:
         return False
     if getattr(node, "is_auth_guard", False):
         return True
+    deny_patterns = ("deny", "denyall", "reject", "block", "forbidden")
     if isinstance(node, MiddlewareNode):
         if str(node.type).upper() == "AUTHZ":
             return True
         name_lower = node.name.lower()
         if any(
             token in name_lower
-            for token in ("isowner", "hasrole", "has_role", "is_owner", "check_permission", "rbac", "authoriz")
+            for token in (
+                "isowner",
+                "hasrole",
+                "has_role",
+                "is_owner",
+                "check_permission",
+                "rbac",
+                "authoriz",
+                *deny_patterns,
+            )
         ):
             return True
     elif isinstance(node, HandlerNode):
@@ -125,6 +135,7 @@ def is_authorization_guard(node: BaseNode | None) -> bool:
             "check_permission",
             "require_permission",
             "verify_permission",
+            *deny_patterns,
         )
         if any(token in name_lower for token in guard_patterns):
             return True
