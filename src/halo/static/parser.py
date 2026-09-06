@@ -247,6 +247,9 @@ class CodeParser:
         """Deduplicate routes by (method, normalized_path) and aggregate chained middlewares."""
         merged: dict[tuple[str, str], RouteDefinition] = {}
         for r in routes:
+            raw = (r.path or "").strip()
+            if " " in raw or ">" in raw or raw.startswith("."):
+                continue
             key = (r.method.upper(), r.normalized_path or r.path)
             if key not in merged:
                 merged[key] = r

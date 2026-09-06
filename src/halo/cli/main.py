@@ -112,6 +112,8 @@ def discover_repo_files(repo_path: str | Path) -> list[Path]:
         ".pytest_cache",
         ".superpowers",
         ".halo",
+        "cypress",
+        "__tests__",
     }
     supported_extensions = set(CodeParser.EXT_TO_LANG.keys())
     matched_files: list[Path] = []
@@ -119,6 +121,12 @@ def discover_repo_files(repo_path: str | Path) -> list[Path]:
     for root, dirs, files in os.walk(path):
         dirs[:] = [d for d in dirs if d not in ignored_directories and not d.startswith(".")]
         for f in files:
+            f_lower = f.lower()
+            if any(
+                f_lower.endswith(sfx)
+                for sfx in (".spec.ts", ".spec.js", ".test.ts", ".test.js", ".cy.ts", ".cy.js")
+            ):
+                continue
             ext = Path(f).suffix.lower()
             if ext in supported_extensions:
                 matched_files.append(Path(root) / f)
