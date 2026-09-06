@@ -77,20 +77,24 @@ if __name__ == "__main__":
 '''
         return script
 
-    def generate_pep723_script(self, finding: FindingData | FindingRecord) -> str:
+    def generate_pep723_script(
+        self,
+        finding: FindingData | FindingRecord,
+        tokens: dict[str, str] | None = None,
+    ) -> str:
         """Generate PEP 723 script directly from a FindingData or FindingRecord instance."""
-        tokens: dict[str, str] = {}
+        extracted_tokens: dict[str, str] = dict(tokens or {})
         for s in (finding.reproduction_steps or []):
             if isinstance(s, dict):
                 tok = s.get("token") or s.get("auth_token")
                 actor_raw = str(s.get("as") or s.get("actor") or "").lower()
                 if tok:
                     if "admin" in actor_raw:
-                        tokens.setdefault("ADMIN", tok)
+                        extracted_tokens.setdefault("ADMIN", tok)
                     elif "b" in actor_raw or "victim" in actor_raw:
-                        tokens.setdefault("USER_B", tok)
+                        extracted_tokens.setdefault("USER_B", tok)
                     else:
-                        tokens.setdefault("USER_A", tok)
+                        extracted_tokens.setdefault("USER_A", tok)
         return self.build_script(
             finding_id=finding.id,
             flaw_type=finding.flaw_type,
@@ -99,7 +103,7 @@ if __name__ == "__main__":
             steps=finding.reproduction_steps,
             method=finding.method,
             details=finding.details,
-            tokens=tokens or None,
+            tokens=extracted_tokens or None,
         )
 
     def build_standalone_script(self, finding: FindingData | FindingRecord) -> str:

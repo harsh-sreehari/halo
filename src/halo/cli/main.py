@@ -31,7 +31,7 @@ from halo.dast.probes.mass_assignment import MassAssignmentProbe
 from halo.dast.probes.race import RaceConditionProbe
 from halo.dast.probes.workflow import WorkflowProbe, WorkflowStep
 from halo.dast.sandbox import SandboxManager
-from halo.dast.vault import SessionVault
+from halo.dast.vault import PersonaType, SessionVault
 from halo.intent.extractor import IntentExtractor
 from halo.intent.hypothesis import (
     FLAW_CLASS_NORMALIZATION,
@@ -114,6 +114,7 @@ def discover_repo_files(repo_path: str | Path) -> list[Path]:
         ".halo",
         "cypress",
         "__tests__",
+        "codefixes",
     }
     supported_extensions = set(CodeParser.EXT_TO_LANG.keys())
     matched_files: list[Path] = []
@@ -540,6 +541,7 @@ def scan(
     # Stage 3: DAST - Dynamic Active Verification
     # -------------------------------------------------------------------------
     verified_findings: list[FindingRecord] = []
+    vault: SessionVault | None = None
     if url or docker:
         console.print("\n[bold blue]Stage 3: Running Autonomous DAST Probing...[/bold blue]")
         sandbox: SandboxManager | None = None
@@ -548,9 +550,8 @@ def scan(
         if docker:
             sandbox = SandboxManager(safe_mode=safe_mode)
             try:
-                sandbox.boot_sandbox(repo)
-                target_url = sandbox.container_url or f"http://localhost:{sandbox.default_port}"
-            except Exception as e:  # noqa: BLE001
+                target_url = sandbox.boot_sandbox(repo_path=repo)
+            except RuntimeError as e:
                 console.print(f"[bold yellow]Warning:[/bold yellow] Sandbox boot failed: {e}")
                 target_url = url or "http://localhost:8000"
 
@@ -589,9 +590,23 @@ def scan(
     poc_builder = PoCBuilder()
     patcher = RemediationPatcher()
 
+    vault_tokens: dict[str, str] = {}
+    if vault is not None:
+        for p_type, name in [
+            (PersonaType.USER_A, "USER_A"),
+            (PersonaType.USER_B, "USER_B"),
+            (PersonaType.ADMIN, "ADMIN"),
+        ]:
+            try:
+                p = vault.get_persona(p_type)
+                if p and p.token:
+                    vault_tokens[name] = p.token
+            except (KeyError, AttributeError):
+                continue
+
     for finding in verified_findings:
         # Generate standalone PEP 723 PoC
-        poc_code = poc_builder.generate_pep723_script(finding)
+        poc_code = poc_builder.generate_pep723_script(finding, tokens=vault_tokens or None)
         if verify_pocs and (url or (docker and target_url)):
             t_url = finding.target_url or target_url or url or ""
             repair_loop = PoCRepairLoop(llm_provider=llm_provider)
@@ -774,8 +789,22 @@ def dast(
 
     poc_builder = PoCBuilder()
     patcher = RemediationPatcher()
+    vault_tokens: dict[str, str] = {}
+    if vault:
+        for p_type, name in [
+            (PersonaType.USER_A, "USER_A"),
+            (PersonaType.USER_B, "USER_B"),
+            (PersonaType.ADMIN, "ADMIN"),
+        ]:
+            try:
+                p = vault.get_persona(p_type)
+                if p and p.token:
+                    vault_tokens[name] = p.token
+            except (KeyError, AttributeError):
+                continue
+
     for finding in verified_findings:
-        poc_code = poc_builder.generate_pep723_script(finding)
+        poc_code = poc_builder.generate_pep723_script(finding, tokens=vault_tokens or None)
         if verify_pocs and url:
             repair_loop = PoCRepairLoop()
             _, poc_code = repair_loop.repair_and_verify(
