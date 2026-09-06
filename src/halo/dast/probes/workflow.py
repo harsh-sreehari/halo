@@ -65,13 +65,17 @@ class WorkflowProbe(BaseProbe):
             extra = recipe.get("extra_params", recipe)
             raw_steps = extra.get("workflow_steps", extra.get("steps", []))
 
-        if not raw_steps:
+        if not raw_steps or len(raw_steps) < 2:
+            ep = ""
+            if raw_steps:
+                first = raw_steps[0]
+                ep = first.endpoint if isinstance(first, WorkflowStep) else first.get("endpoint", "")
             return ProbeResult(
                 flaw_type="WORKFLOW_BYPASS",
-                endpoint="",
+                endpoint=ep,
                 vulnerable=False,
                 confidence=0.0,
-                details="No workflow steps defined to permute.",
+                details="Workflow probing requires at least 2 steps with prerequisite state to permute.",
             )
 
         # Normalize into WorkflowStep models
@@ -162,7 +166,7 @@ class WorkflowProbe(BaseProbe):
         # 2. Permutation Strategy: Direct Out-of-Order Terminal Execution
         # -------------------------------------------------------------------
         # Test directly calling the terminal step without prior workflow setup
-        if len(steps) >= 1:
+        if len(steps) >= 2:
             terminal_step = steps[-1]
             is_vuln, last_resp, seq_req_ev, seq_resp_ev = self._run_step_sequence(
                 http_client, [terminal_step], actor_headers, actor_type.value, target_url, vault

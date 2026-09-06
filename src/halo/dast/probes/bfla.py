@@ -234,6 +234,48 @@ class BFLAProbe(BaseProbe):
         # -------------------------------------------------------------------
         # Synthesize Verification Findings
         # -------------------------------------------------------------------
+        # Check if the endpoint is a benign public metadata endpoint
+        is_read_only = method.upper() in {"GET", "HEAD"}
+        if is_read_only and user_succeeded and unauth_succeeded:
+            ep_lower = endpoint.lower()
+            public_tokens = (
+                "version",
+                "application-version",
+                "app-version",
+                "application-configuration",
+                "health",
+                "info",
+                "public",
+                "ping",
+                "status",
+            )
+            admin_sensitive_tokens = (
+                "export",
+                "settings",
+                "users",
+                "roles",
+                "secrets",
+                "keys",
+                "backup",
+                "logs",
+                "delete",
+                "modify",
+            )
+            is_metadata = any(pt in ep_lower for pt in public_tokens) and not any(
+                st in ep_lower for st in admin_sensitive_tokens
+            )
+            if is_metadata:
+                return ProbeResult(
+                    flaw_type="BFLA",
+                    endpoint=endpoint,
+                    vulnerable=False,
+                    confidence=0.0,
+                    request_evidence=req_evidence,
+                    response_evidence=resp_evidence,
+                    reproduction_steps=reproduction_steps,
+                    details=f"Endpoint {endpoint} is a public metadata endpoint and does not expose administrative functions.",
+                )
+
         is_vuln = user_succeeded or unauth_succeeded
         if is_vuln:
             if user_succeeded and unauth_succeeded:

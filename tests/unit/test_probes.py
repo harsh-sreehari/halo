@@ -837,3 +837,69 @@ def test_bola_probe_handles_delete_method_and_preserves_template():
     assert result.endpoint == "/api/Users/:id"
     assert result.vulnerable is False
 
+
+def test_workflow_probe_rejects_single_step_bypass():
+    """Verify WorkflowProbe rejects single-step sequences with no prerequisites."""
+    probe = WorkflowProbe()
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"status": "ok"})),
+        base_url="http://test",
+    )
+    vault = SessionVault()
+    steps = [WorkflowStep(name="action", endpoint="/rest/basket/1/checkout", method="POST")]
+    res = probe.execute(
+        client=client,
+        target_url="http://test",
+        vault=vault,
+        workflow_steps=steps,
+    )
+    assert res.vulnerable is False
+    assert (
+        "prerequisite" in res.details.lower()
+        or "single-step" in res.details.lower()
+        or "no workflow" in res.details.lower()
+    )
+
+
+def test_mass_assignment_verifies_field_mutation():
+    """Verify MassAssignmentProbe requires privilege attribute to be reflected/persisted."""
+    probe = MassAssignmentProbe()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, json={"id": 1, "username": "alice", "role": "customer"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
+    vault = SessionVault()
+    res = probe.execute(
+        client=client,
+        target_url="http://test",
+        vault=vault,
+        endpoint="/api/Users",
+        method="POST",
+        payload={"username": "alice", "role": "admin"},
+    )
+    assert res.vulnerable is False
+
+
+def test_bfla_probe_rejects_public_metadata_endpoint():
+    """Verify BFLAProbe does not flag public read-only metadata endpoints as BFLA."""
+    probe = BFLAProbe()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"version": "1.0.0", "name": "app"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
+    vault = SessionVault()
+    vault.set_token(PersonaType.ADMIN, "token_admin")
+    vault.set_token(PersonaType.USER_A, "token_user")
+
+    res = probe.execute(
+        client=client,
+        target_url="http://test",
+        vault=vault,
+        endpoint="/rest/admin/application-version",
+        method="GET",
+    )
+    assert res.vulnerable is False
+
+

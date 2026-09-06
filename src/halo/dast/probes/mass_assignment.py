@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -116,36 +117,78 @@ class MassAssignmentProbe(BaseProbe):
             # Semantic Oracle: Verify that injected attributes are actually reflected or bound in response
             try:
                 resp_json = resp.json()
-                if isinstance(resp_json, dict):
-                    reflected = False
-                    for k, v in tamper_payload.items():
-                        if k in ("items",):
-                            continue
-                        if k in resp_json:
-                            if resp_json[k] == v or str(resp_json[k]) == str(v):
-                                reflected = True
-                                break
-                            if (
-                                isinstance(v, (int, float))
-                                and isinstance(resp_json[k], (int, float))
-                                and abs(float(resp_json[k]) - float(v)) < 1e-5
-                            ):
-                                reflected = True
-                                break
-                    if not reflected:
-                        resp_str = resp.text
-                        for k, v in tamper_payload.items():
+
+                priv_keys = {
+                    "role",
+                    "roles",
+                    "is_admin",
+                    "isadmin",
+                    "admin",
+                    "total",
+                    "price",
+                    "discount",
+                    "amount",
+                    "balance",
+                    "credit",
+                    "credits",
+                    "status",
+                    "verified",
+                    "vip",
+                    "tier",
+                    "permissions",
+                    "access_level",
+                }
+                injected_field = extra.get("injected_field")
+                target_keys: dict[str, Any] = {}
+                if injected_field and injected_field in tamper_payload:
+                    target_keys = {injected_field: tamper_payload[injected_field]}
+                else:
+                    target_keys = {
+                        k: v for k, v in tamper_payload.items() if k.lower() in priv_keys
+                    }
+                if not target_keys:
+                    benign = {"username", "email", "password", "name", "items", "description"}
+                    target_keys = {
+                        k: v for k, v in tamper_payload.items() if k.lower() not in benign
+                    }
+                if not target_keys:
+                    target_keys = tamper_payload
+
+                def check_reflected(data: Any) -> bool:
+                    if isinstance(data, dict):
+                        for k, v in target_keys.items():
                             if k in ("items",):
                                 continue
-                            if f'"{k}"' in resp_str and str(v) in resp_str:
-                                reflected = True
-                                break
-                    is_vuln = reflected
-                else:
-                    is_vuln = True
+                            if k in data:
+                                if data[k] == v or str(data[k]) == str(v):
+                                    return True
+                                if (
+                                    isinstance(v, (int, float))
+                                    and isinstance(data[k], (int, float))
+                                    and abs(float(data[k]) - float(v)) < 1e-5
+                                ):
+                                    return True
+                        return any(
+                            check_reflected(sub)
+                            for sub in data.values()
+                            if isinstance(sub, (dict, list))
+                        )
+                    elif isinstance(data, list):
+                        return any(check_reflected(item) for item in data)
+                    return False
+
+                reflected = check_reflected(resp_json)
+                if not reflected and isinstance(resp_json, str):
+                    for k, v in target_keys.items():
+                        if k in ("items",):
+                            continue
+                        pattern = rf'"{re.escape(k)}"\s*:\s*(?:"{re.escape(str(v))}"|{re.escape(str(v))})'
+                        if re.search(pattern, resp.text):
+                            reflected = True
+                            break
+                is_vuln = reflected
             except Exception:  # noqa: BLE001
-                resp_str = resp.text
-                is_vuln = any(str(v) in resp_str for k, v in tamper_payload.items() if k != "items")
+                is_vuln = False
 
         reproduction_steps.append(
             {
