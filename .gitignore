@@ -49,8 +49,8 @@ ckg.json
 .vscode/
 *.swp
 
-# Superpowers scratch & worktrees
+# Local artifacts and testbeds
+testbed/
 .superpowers/
 .worktrees/
 worktrees/
-

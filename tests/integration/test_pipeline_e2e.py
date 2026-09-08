@@ -22,14 +22,14 @@ import httpx
 from typer.testing import CliRunner
 
 from halo.cli.main import app
-from testbed.python_mock_target import MockTargetServer, run_mock_server
+from tests.fixtures.testbed.python_mock_target import MockTargetServer, run_mock_server
 
 runner = CliRunner()
 
 
 def test_full_pipeline_against_ground_truth(tmp_path: Path) -> None:
     """Full golden E2E test executing HALO scan against the mock target testbed."""
-    repo_dir = Path(__file__).parent.parent.parent / "testbed"
+    repo_dir = Path(__file__).parent.parent / "fixtures" / "testbed"
     out_dir = tmp_path / "halo_output"
     out_dir.mkdir(parents=True, exist_ok=True)
 

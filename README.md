@@ -221,7 +221,7 @@ ruff format .
 
 ## Documentation
 
-* [Technical & Architectural Specification](docs/superpowers/specs/2026-09-05-halo-vulnerability-scanner-design.md)
+* [Technical & Architectural Specification](docs/specs/2026-09-05-halo-vulnerability-scanner-design.md)
 
 ---
 
